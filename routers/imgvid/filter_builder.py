@@ -91,9 +91,11 @@ def build_slide_filter(
         if img_ox != 0 or img_oy != 0:
             ox_px = int(sw * img_ox / 100)
             oy_px = int(sh * img_oy / 100)
+            x_expr = f"max(1-iw,min(ow-1,(ow-iw)/2+{ox_px}))"
+            y_expr = f"max(1-ih,min(oh-1,(oh-ih)/2+{oy_px}))"
             cur_scale_f = (
                 f"scale={sw}:{sh}:force_original_aspect_ratio=decrease,"
-                f"pad={sw}:{sh}:(ow-iw)/2+{ox_px}:(oh-ih)/2+{oy_px}:black,"
+                f"pad={sw}:{sh}:{x_expr}:{y_expr}:black,"
                 f"setsar=1,fps={fps},format=yuv420p"
             )
 
@@ -119,15 +121,21 @@ def build_slide_filter(
         fy = int(height * frame_y_pct / 100)
         crop_x = max(0, -fx)
         crop_y = max(0, -fy)
-        vis_w = max(2, min(sw - crop_x, width  - max(0, fx)))
-        vis_h = max(2, min(sh - crop_y, height - max(0, fy)))
+        vis_w = min(sw - crop_x, width  - max(0, fx))
+        vis_h = min(sh - crop_y, height - max(0, fy))
         place_x = max(0, fx)
         place_y = max(0, fy)
-        if vis_w > 1 and vis_h > 1:
+        if vis_w > 1 and vis_h > 1 and place_x < width and place_y < height:
             if crop_x > 0 or crop_y > 0 or vis_w < sw or vis_h < sh:
                 parts.append(f"crop={vis_w}:{vis_h}:{crop_x}:{crop_y}")
             parts.append(
                 f"pad={width}:{height}:{place_x}:{place_y}:black,"
+                f"setsar=1,fps={fps},format=yuv420p"
+            )
+        else:
+            parts.append(
+                f"scale=2:2,"
+                f"pad={width}:{height}:{width}:{height}:black,"
                 f"setsar=1,fps={fps},format=yuv420p"
             )
 

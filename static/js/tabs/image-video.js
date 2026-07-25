@@ -90,6 +90,14 @@ export async function init() {
     const _getSnapTargets = (excludeIdx, type) => getSnapTargets(S, excludeIdx, type);
     const _snap = snap;
     const _probeAudioDuration = probeAudioDuration;
+    // Total project duration including audio tracks that extend beyond slides
+    const _extTotal = () => {
+        const audioEnd = S.audioTracks.reduce((m, t) => {
+            const e = (t.startOffset || 0) + (t.duration !== undefined ? t.duration : (t.originalDuration || 0));
+            return Math.max(m, e);
+        }, 0);
+        return Math.max(totalDur(), audioEnd);
+    };
 
     const section       = document.querySelector('[data-panel="imgvid"]');
     const newBtn        = $('ive-new-btn');
@@ -326,10 +334,10 @@ export async function init() {
     playPauseBtn.addEventListener('click', _togglePlay);
     stopBtn.addEventListener('click',      () => { _stopPlayback(); _seek(0); });
     fwdBtn.addEventListener('click',    () => _seek(S.currentTime + 5));
-    goEnd.addEventListener('click',     () => _seek(totalDur()));
+    goEnd.addEventListener('click',     () => _seek(_extTotal()));
 
     seekBar.addEventListener('input', () => {
-        _seek((parseFloat(seekBar.value) / 10000) * totalDur());
+        _seek((parseFloat(seekBar.value) / 10000) * _extTotal());
     });
 
     // ── Preview zoom ──────────────────────────────────────────────────────────
@@ -436,7 +444,7 @@ export async function init() {
     function _applyCanvasCrop() {
         const { resW, resH } = _cropCanvasRes();
         const { x, y, w, h } = _cropDraft;
-        S.canvasCrop = (x === 0 && y === 0 && w === resW && h === resH) ? null : { x, y, w, h };
+        S.canvasCrop = (x === 0 && y === 0 && w === resW && h === resH) ? null : { x, y, w, h, resW, resH };
         S.dirty = true;
         cropOv.style.display = 'none';
         _cropDraft = null; _cropPrevCrop = null; _cropDragMode = null;
@@ -988,7 +996,7 @@ export async function init() {
             if (overlapY(audioTrackEl)) {
                 S.audioTracks.forEach((track, i) => {
                     const tStart = track.startOffset || 0;
-                    const tEnd = tStart + (track.duration !== undefined ? track.duration : Math.max(1, totalDur() - tStart));
+                    const tEnd = tStart + (track.duration !== undefined ? track.duration : (track.originalDuration || Math.max(1, _extTotal() - tStart)));
                     if (tEnd > t1 && tStart < t2) { S.selAudioIdxs.add(i); S.selAudioIdx = i; }
                 });
             }
@@ -1036,7 +1044,7 @@ export async function init() {
             case 'ArrowLeft':   e.preventDefault(); _seek(S.currentTime - (e.shiftKey ? 1 : 0.1)); break;
             case 'ArrowRight':  e.preventDefault(); _seek(S.currentTime + (e.shiftKey ? 1 : 0.1)); break;
             case 'Home':        e.preventDefault(); _seek(0);                                  break;
-            case 'End':         e.preventDefault(); _seek(totalDur());                         break;
+            case 'End':         e.preventDefault(); _seek(_extTotal());                        break;
             case 'Delete': case 'Backspace': {
             const hasAnySelection = S.selIdx >= 0 || S.selIdxs.size > 0 ||
                 S.selSubIdx >= 0 || S.selSubIdxs.size > 0 ||
@@ -1399,8 +1407,8 @@ export async function init() {
     function _togglePlay() { S.isPlaying ? _pausePlayback() : _startPlayback(); }
 
     function _startPlayback() {
-        if (!S.clips.length) return;
-        if (S.currentTime >= totalDur() - 0.05) _seek(0);
+        if (!S.clips.length && !S.audioTracks.length) return;
+        if (S.currentTime >= _extTotal() - 0.05) _seek(0);
         S.isPlaying = true;
         S._playStartReal    = performance.now();
         S._playStartProject = S.currentTime;
@@ -1430,7 +1438,7 @@ export async function init() {
     function _tick(now) {
         if (!S.isPlaying) return;
         const elapsed = (now - S._playStartReal) / 1000;
-        const total   = totalDur();
+        const total   = _extTotal();
         S.currentTime = Math.min(S._playStartProject + elapsed, total);
         _updateTransportUI();
         renderPreview();
@@ -1443,7 +1451,7 @@ export async function init() {
     }
 
     function _seek(t) {
-        S.currentTime = Math.max(0, Math.min(totalDur(), t));
+        S.currentTime = Math.max(0, Math.min(_extTotal(), t));
         if (S.isPlaying) { S._playStartReal = performance.now(); S._playStartProject = S.currentTime; }
         _updateTransportUI();
         renderPreview();
@@ -1452,7 +1460,7 @@ export async function init() {
     }
 
     function _updateTransportUI() {
-        const total = totalDur();
+        const total = _extTotal();
         seekBar.value = total > 0 ? (S.currentTime / total) * 10000 : 0;
         curTime.textContent = fmt(S.currentTime);
         totTime.textContent = fmt(total);
@@ -1507,8 +1515,10 @@ export async function init() {
         const resH   = parts[1] || 1080;
 
         const crop  = S.canvasCrop;
-        const viewW = (crop && crop.w > 0) ? crop.w : resW;
-        const viewH = (crop && crop.h > 0) ? crop.h : resH;
+        const cropSx = (crop && crop.resW) ? resW / crop.resW : 1;
+        const cropSy = (crop && crop.resH) ? resH / crop.resH : 1;
+        const viewW = (crop && crop.w > 0) ? Math.round(crop.w * cropSx) : resW;
+        const viewH = (crop && crop.h > 0) ? Math.round(crop.h * cropSy) : resH;
 
         let w, h;
         if (S.previewMode === 'original') {
@@ -2070,6 +2080,7 @@ export async function init() {
                     }
                     S.activeTab = 'slide'; renderTimeline(); renderProps();
                     const sx = e.clientX, sy = e.clientY;
+                    const scrollStart = tracksScroll.scrollLeft;
                     const _dragInitAudio = [...S.selAudioIdxs].map(idx => ({
                         idx,
                         startOffset: S.audioTracks[idx]?.startOffset || 0,
@@ -2088,7 +2099,8 @@ export async function init() {
                     const onMove = ev => {
                         if (!moved && Math.abs(ev.clientX - sx) < 4 && Math.abs(ev.clientY - sy) < 4) return;
                         moved = true;
-                        const dx = (ev.clientX - sx) / S.pxPerSec;
+                        const scrollDx = tracksScroll.scrollLeft - scrollStart;
+                        const dx = (ev.clientX - sx + scrollDx) / S.pxPerSec;
                         const laneShift = Math.round((ev.clientY - sy) / rowH);
                         _dragInitAudio.forEach(({ idx, startOffset, laneIndex: initLane }) => {
                             if (!S.audioTracks[idx]) return;
@@ -2109,6 +2121,9 @@ export async function init() {
                             p.startTime = newStart; p.endTime = Math.round((newStart + dur) * 10) / 10;
                         });
                         S.dirty = true; renderTimeline(); renderProps();
+                        const scR = tracksScroll.getBoundingClientRect();
+                        if (ev.clientX > scR.right - 50) tracksScroll.scrollLeft += 10;
+                        else if (ev.clientX < scR.left + 50) tracksScroll.scrollLeft = Math.max(0, tracksScroll.scrollLeft - 10);
                     };
                     const onUp = () => {
                         document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp);
@@ -2120,12 +2135,14 @@ export async function init() {
                 lh.addEventListener('mousedown', e => {
                     e.stopPropagation(); e.preventDefault();
                     const sx = e.clientX, sOff = track.startOffset || 0, sTrimIn = track.trimIn || 0;
+                    const scrollStart = tracksScroll.scrollLeft;
                     const sDur = track.duration !== undefined ? track.duration : (track.originalDuration || Math.max(1, extTotal - sOff));
                     const outPt = sOff + sDur;
                     let moved = false;
                     const onMove = ev => {
                         moved = true;
-                        const dx = (ev.clientX - sx) / S.pxPerSec;
+                        const scrollDx = tracksScroll.scrollLeft - scrollStart;
+                        const dx = (ev.clientX - sx + scrollDx) / S.pxPerSec;
                         const maxTrimIn = (track.originalDuration || 9999) - 0.5;
                         const newOff    = Math.max(0, Math.round((sOff + dx) * 10) / 10);
                         const newTrimIn = Math.max(0, Math.min(maxTrimIn, Math.round((sTrimIn + dx) * 10) / 10));
@@ -2133,6 +2150,9 @@ export async function init() {
                         track.trimIn      = newTrimIn;
                         track.duration    = Math.max(0.5, Math.round((outPt - newOff) * 10) / 10);
                         S.dirty = true; renderTimeline(); if (i === S.selAudioIdx) renderProps();
+                        const scR = tracksScroll.getBoundingClientRect();
+                        if (ev.clientX > scR.right - 50) tracksScroll.scrollLeft += 10;
+                        else if (ev.clientX < scR.left + 50) tracksScroll.scrollLeft = Math.max(0, tracksScroll.scrollLeft - 10);
                     };
                     const onUp = () => {
                         document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp);
@@ -2144,13 +2164,18 @@ export async function init() {
                 rh.addEventListener('mousedown', e => {
                     e.stopPropagation(); e.preventDefault();
                     const sx = e.clientX;
+                    const scrollStart = tracksScroll.scrollLeft;
                     const sDur = track.duration !== undefined ? track.duration : (track.originalDuration || Math.max(1, extTotal - (track.startOffset || 0)));
                     let moved = false;
                     const onMove = ev => {
                         moved = true;
+                        const scrollDx = tracksScroll.scrollLeft - scrollStart;
                         const maxDur = (track.originalDuration || 9999) - (track.trimIn || 0);
-                        track.duration = Math.max(0.5, Math.min(maxDur, Math.round((sDur + (ev.clientX - sx) / S.pxPerSec) * 10) / 10));
+                        track.duration = Math.max(0.5, Math.min(maxDur, Math.round((sDur + (ev.clientX - sx + scrollDx) / S.pxPerSec) * 10) / 10));
                         S.dirty = true; renderTimeline(); if (i === S.selAudioIdx) renderProps();
+                        const scR = tracksScroll.getBoundingClientRect();
+                        if (ev.clientX > scR.right - 50) tracksScroll.scrollLeft += 10;
+                        else if (ev.clientX < scR.left + 50) tracksScroll.scrollLeft = Math.max(0, tracksScroll.scrollLeft - 10);
                     };
                     const onUp = () => {
                         document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp);
@@ -2305,8 +2330,8 @@ export async function init() {
     }
 
     function renderPlayhead() {
-        const total = totalDur();
-        if (total <= 0 || !S.clips.length) { playheadEl.style.display = 'none'; return; }
+        const total = _extTotal();
+        if (total <= 0) { playheadEl.style.display = 'none'; return; }
         playheadEl.style.display = 'block';
         playheadEl.style.left    = (S.currentTime * S.pxPerSec) + 'px';
         if (S.isPlaying) {
@@ -2777,7 +2802,12 @@ export async function init() {
             const track = S.audioTracks[S.selAudioIdx];
             const st = track.startOffset || 0;
             const origDur = track.originalDuration || 3600;
-            const usedDur = track.duration !== undefined ? track.duration : Math.max(1, totalDur() - st);
+            const _audioEnd = S.audioTracks.reduce((m, trk) => {
+                const e = (trk.startOffset || 0) + (trk.duration !== undefined ? trk.duration : (trk.originalDuration || 0));
+                return Math.max(m, e);
+            }, 0);
+            const _extTot = Math.max(totalDur(), _audioEnd);
+            const usedDur = track.duration !== undefined ? track.duration : (track.originalDuration || Math.max(1, _extTot - st));
             const end = st + usedDur;
             if (t <= st + 0.05 || t >= end - 0.05) {
                 toast('Поставьте курсор внутри аудиодорожки', 'warn'); return;
@@ -5454,7 +5484,14 @@ export async function init() {
         fd.append('audio_ch',       settings.audioCh);
         if (S.canvasCrop) {
             const c = S.canvasCrop;
-            fd.append('canvas_crop', `${c.x},${c.y},${c.w},${c.h}`);
+            const { w: expW, h: expH } = expModal.getResolution();
+            const sx = c.resW ? expW / c.resW : 1;
+            const sy = c.resH ? expH / c.resH : 1;
+            const cx = Math.round(c.x * sx);
+            const cy = Math.round(c.y * sy);
+            const cw = Math.round(c.w * sx);
+            const ch = Math.round(c.h * sy);
+            fd.append('canvas_crop', `${cx},${cy},${cw},${ch}`);
         }
         try {
             await synthesizeStream('/api/imgvid/export', { method: 'POST', body: fd }, {
