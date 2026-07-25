@@ -5939,7 +5939,20 @@ export async function init() {
                 || (clip.subtitles || []).find(s => local >= (s.start || 0) && local <= (s.end ?? clip.duration));
             if (activeSub?.text) _drawSubtitleOnCanvas(ctx, activeSub, cw, ch);
 
-            canvas.toBlob(blob => {
+            // Apply canvas crop if set
+            let outCanvas = canvas;
+            if (S.canvasCrop) {
+                const c  = S.canvasCrop;
+                const sx = c.resW ? cw / c.resW : 1;
+                const sy = c.resH ? ch / c.resH : 1;
+                const rx = Math.round(c.x * sx), ry = Math.round(c.y * sy);
+                const rw = Math.round(c.w * sx),  rh = Math.round(c.h * sy);
+                outCanvas = document.createElement('canvas');
+                outCanvas.width = rw; outCanvas.height = rh;
+                outCanvas.getContext('2d').drawImage(canvas, rx, ry, rw, rh, 0, 0, rw, rh);
+            }
+
+            outCanvas.toBlob(blob => {
                 const a = document.createElement('a');
                 a.href = URL.createObjectURL(blob);
                 a.download = `frame_${S.currentTime.toFixed(2).replace('.', 's')}.png`;
