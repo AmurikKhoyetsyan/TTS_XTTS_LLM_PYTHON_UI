@@ -158,6 +158,7 @@ export async function init() {
     const labelsScroll  = $('ive-labels-scroll');
     const propsBody     = $('ive-props-body');
     const trimBtn       = $('ive-trim-btn');
+    const saveFrameBtn  = $('ive-save-frame-btn');
     // Transition preview elements
     const previewContentNext = $('ive-preview-content-next');
     const previewImgNext     = $('ive-preview-img-next');
@@ -1088,8 +1089,10 @@ export async function init() {
     fwdBtn.innerHTML        = ICONS.skipFwd;
     goEnd.innerHTML         = ICONS.tbGoEnd;
     trimBtn.innerHTML       = ICONS.scissors;
+    saveFrameBtn.innerHTML  = ICONS.camera;
 
     trimBtn.addEventListener('click', _splitAtPlayhead);
+    saveFrameBtn.addEventListener('click', _saveCurrentFrame);
 
     await loadProjectsList();
     await loadTemplatesList();
@@ -5870,5 +5873,126 @@ export async function init() {
         if (!s) return;
         expModal.applySettings(s);
         _updatePreviewSize();
+    }
+
+    async function _saveCurrentFrame() {
+        const info = clipAtTime(S.currentTime);
+        if (!info || !info.clip) { toast('Нет кадра для сохранения', 'warn'); return; }
+
+        const clip  = info.inTransition ? info.outClip : info.clip;
+        const local = info.inTransition ? clip.duration : info.local;
+        const { w: resW, h: resH } = expModal.getResolution();
+        const cw = resW || 1920, ch = resH || 1080;
+
+        const canvas = document.createElement('canvas');
+        canvas.width = cw; canvas.height = ch;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#000'; ctx.fillRect(0, 0, cw, ch);
+
+        const cssFilter = buildCSSFilter(clip.effects || []);
+
+        try {
+            if (clip.type === 'image') {
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = clip.fileUrl; if (img.complete && img.naturalWidth) res(); });
+
+                const imgAR = img.naturalWidth / img.naturalHeight;
+                const cAR   = cw / ch;
+                let dw = imgAR > cAR ? cw : ch * imgAR;
+                let dh = imgAR > cAR ? cw / imgAR : ch;
+                const dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+
+                const sc = (clip.imgScale || 100) / 100;
+                const tx = (clip.imgOffsetX || 0) / 100 * cw;
+                const ty = (clip.imgOffsetY || 0) / 100 * ch;
+
+                if (cssFilter) ctx.filter = cssFilter;
+                ctx.save();
+                const crop = clip.crop;
+                if (crop && (crop.x > 0 || crop.y > 0 || crop.w < 100 || crop.h < 100)) {
+                    ctx.beginPath();
+                    ctx.rect(crop.x / 100 * cw, crop.y / 100 * ch, crop.w / 100 * cw, crop.h / 100 * ch);
+                    ctx.clip();
+                }
+                ctx.translate(cw / 2, ch / 2);
+                ctx.scale(sc, sc);
+                ctx.translate(tx, ty);
+                ctx.drawImage(img, dx - cw / 2, dy - ch / 2, dw, dh);
+                ctx.restore();
+                ctx.filter = 'none';
+            } else {
+                // Video: capture current frame from the live preview element
+                const vW = previewVideo.videoWidth || cw;
+                const vH = previewVideo.videoHeight || ch;
+                const vAR = vW / vH, cAR = cw / ch;
+                let dw = vAR > cAR ? cw : ch * vAR;
+                let dh = vAR > cAR ? cw / vAR : ch;
+                if (cssFilter) ctx.filter = cssFilter;
+                ctx.drawImage(previewVideo, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+                ctx.filter = 'none';
+            }
+
+            // Subtitle overlay
+            const _t = S.currentTime;
+            const activeSub = S.subtitles.find(s => _t >= (s.start || 0) && _t <= (s.end ?? 3))
+                || (clip.subtitles || []).find(s => local >= (s.start || 0) && local <= (s.end ?? clip.duration));
+            if (activeSub?.text) _drawSubtitleOnCanvas(ctx, activeSub, cw, ch);
+
+            canvas.toBlob(blob => {
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `frame_${S.currentTime.toFixed(2).replace('.', 's')}.png`;
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+            }, 'image/png');
+            toast('Кадр сохранён', 'ok');
+        } catch (e) {
+            console.error(e);
+            toast('Ошибка сохранения кадра', 'err');
+        }
+    }
+
+    function _drawSubtitleOnCanvas(ctx, sub, cw, ch) {
+        const fontSize   = sub.fontSize || 40;
+        const fontFamily = sub.fontFamily || 'Arial';
+        const fw = sub.bold   ? 'bold'   : 'normal';
+        const fi = sub.italic ? 'italic' : 'normal';
+        ctx.font        = `${fi} ${fw} ${fontSize}px "${fontFamily}", sans-serif`;
+        ctx.textAlign   = sub.align || 'center';
+        ctx.textBaseline = 'middle';
+
+        const x = (sub.x ?? 50) / 100 * cw;
+        const y = (sub.y ?? 88) / 100 * ch;
+        const lines = sub.text.split('\n');
+        const lineH = fontSize * (sub.lineHeight || 1.35);
+        const startY = y - (lines.length - 1) * lineH / 2;
+
+        // Background box
+        const bgOp = sub.bgOpacity ?? 0;
+        if (bgOp > 0) {
+            const padX = sub.bgPadX ?? 12, padY = sub.bgPadY ?? 6;
+            const maxW = Math.max(...lines.map(l => ctx.measureText(l).width));
+            const bx = x - maxW / 2 - padX, by = startY - lineH / 2 - padY;
+            const bw = maxW + padX * 2,      bh = lines.length * lineH + padY * 2;
+            ctx.fillStyle = hexToRgba(sub.bgColor || '#000000', bgOp);
+            ctx.beginPath();
+            if (ctx.roundRect) ctx.roundRect(bx, by, bw, bh, sub.bgRadius ?? 4);
+            else ctx.rect(bx, by, bw, bh);
+            ctx.fill();
+        }
+
+        // Outline stroke
+        const outline = sub.outline ?? 2;
+        if (outline > 0) {
+            ctx.strokeStyle = sub.outlineColor || '#000000';
+            ctx.lineWidth   = outline * 2;
+            ctx.lineJoin    = 'round';
+            for (let i = 0; i < lines.length; i++) ctx.strokeText(lines[i], x, startY + i * lineH);
+        }
+
+        // Fill text
+        ctx.fillStyle = sub.color || '#ffffff';
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], x, startY + i * lineH);
     }
 }
