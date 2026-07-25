@@ -342,6 +342,29 @@ async def export_video(
 
                     filter_parts.append(f"[{i}:v]{','.join(parts)}[v{i}]")
 
+                # ── Canvas crop (parse early so PIP/subtitle use cropped dims) ─
+                pip_canvas_w, pip_canvas_h = width, height
+                has_canvas_crop = False
+                cc_x = cc_y = cc_w_val = cc_h_val = 0
+                if canvas_crop:
+                    try:
+                        _cc = [int(v) for v in canvas_crop.split(",")]
+                        if len(_cc) == 4:
+                            _cx, _cy, _cw, _ch = _cc
+                            if _cw > 0 and _ch > 0:
+                                _cx = max(0, min(_cx, width - 1))
+                                _cy = max(0, min(_cy, height - 1))
+                                _cw = max(2, min(_cw, width  - _cx))
+                                _ch = max(2, min(_ch, height - _cy))
+                                _cw = _cw // 2 * 2
+                                _ch = _ch // 2 * 2
+                                if _cw > 0 and _ch > 0:
+                                    cc_x, cc_y, cc_w_val, cc_h_val = _cx, _cy, _cw, _ch
+                                    pip_canvas_w, pip_canvas_h = _cw, _ch
+                                    has_canvas_crop = True
+                    except Exception:
+                        pass
+
                 # ── Subtitles ────────────────────────────────────────────────
                 q.put(("progress", 0.10, "Рендеринг субтитров…"))
                 all_subs: list[dict] = []
@@ -366,13 +389,23 @@ async def export_video(
                                 all_subs.append({**sub, "abs_start": a_start, "abs_end": a_end})
                         t_cur += dur
 
-                sub_filter = build_subtitle_filter(all_subs, tmp, width, height)
+                sub_filter = build_subtitle_filter(all_subs, tmp, pip_canvas_w, pip_canvas_h)
 
                 # ── Transitions ──────────────────────────────────────────────
                 q.put(("progress", 0.12, "Обработка переходов…"))
                 filter_parts, last = build_transition_filters_fps(slides, filter_parts, fps)
 
                 filter_parts.append(f"[{last}]null[vout_base]")
+
+                # Apply canvas_crop before PIP so PIP percentage coords match
+                # the cropped preview (PIP wrappers are children of the cropped
+                # preview area, not the full canvas).
+                pip_base_label = "vout_base"
+                if has_canvas_crop:
+                    filter_parts.append(
+                        f"[vout_base]crop={cc_w_val}:{cc_h_val}:{cc_x}:{cc_y}[vout_cropped_base]"
+                    )
+                    pip_base_label = "vout_cropped_base"
 
                 # ── PIP + Subtitle layer order from trackOrder ───────────────
                 # Lower index in trackOrder = higher visual position = rendered on top.
@@ -385,14 +418,15 @@ async def export_video(
                 if pip_on_top:
                     # Apply subtitle first, then PIP on top
                     if sub_filter:
-                        filter_parts.append(f"[vout_base]{sub_filter}[vout_sub_base]")
+                        sub_base = f"vout_sub_base"
+                        filter_parts.append(f"[{pip_base_label}]{sub_filter}[{sub_base}]")
                         pip_filters, pip_out_label = build_pip_filters(
-                            sorted_pip, pip_input_start, "vout_sub_base", width, height,
+                            sorted_pip, pip_input_start, sub_base, pip_canvas_w, pip_canvas_h,
                             _compute_video_dur(slides), fps,
                         )
                     else:
                         pip_filters, pip_out_label = build_pip_filters(
-                            sorted_pip, pip_input_start, "vout_base", width, height,
+                            sorted_pip, pip_input_start, pip_base_label, pip_canvas_w, pip_canvas_h,
                             _compute_video_dur(slides), fps,
                         )
                     filter_parts.extend(pip_filters)
@@ -400,7 +434,7 @@ async def export_video(
                 else:
                     # Apply PIP first, then subtitle on top (default)
                     pip_filters, pip_out_label = build_pip_filters(
-                        sorted_pip, pip_input_start, "vout_base", width, height,
+                        sorted_pip, pip_input_start, pip_base_label, pip_canvas_w, pip_canvas_h,
                         _compute_video_dur(slides), fps,
                     )
                     filter_parts.extend(pip_filters)
@@ -418,29 +452,6 @@ async def export_video(
                         valid_audio, audio_start_idx, total_dur
                     )
                     filter_parts.extend(audio_filter_parts)
-
-                # ── Canvas crop ──────────────────────────────────────────────
-                if canvas_crop:
-                    try:
-                        cc_parts = [int(v) for v in canvas_crop.split(",")]
-                        if len(cc_parts) == 4:
-                            cc_x, cc_y, cc_w, cc_h = cc_parts
-                            if cc_w > 0 and cc_h > 0:
-                                # Clamp to canvas bounds
-                                cc_x = max(0, min(cc_x, width - 1))
-                                cc_y = max(0, min(cc_y, height - 1))
-                                cc_w = max(2, min(cc_w, width  - cc_x))
-                                cc_h = max(2, min(cc_h, height - cc_y))
-                                # Ensure even dimensions for codecs
-                                cc_w = cc_w // 2 * 2
-                                cc_h = cc_h // 2 * 2
-                                if cc_w > 0 and cc_h > 0:
-                                    filter_parts.append(
-                                        f"[{final_video_label}]crop={cc_w}:{cc_h}:{cc_x}:{cc_y}[vout_crop]"
-                                    )
-                                    final_video_label = "vout_crop"
-                    except Exception:
-                        pass
 
                 # ── Codec ────────────────────────────────────────────────────
                 ext = output_format.lower()
