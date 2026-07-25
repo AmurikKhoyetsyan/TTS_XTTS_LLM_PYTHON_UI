@@ -43,6 +43,7 @@ A local **text-to-speech and video production web app** with eight tabs, served 
 
 - **Windows TTS** — SAPI5 / OneCore voices, adjustable rate and volume, optional SRT generation
 - **XTTS v2 voice cloning** — Coqui neural TTS, 8 languages, GPU-accelerated (CPU fallback)
+- **Whisper transcription** — speech-to-text from audio or video files; auto-populates the subtitle editor
 - **Subtitle burning** — full styling (font, colour, karaoke), style templates, FFmpeg output
 - **Image Video Editor** — non-linear timeline, 22 transitions, per-clip effects, ASS subtitles, PIP layers, audio split/trim, cursor-relative zoom (Ctrl+Scroll)
 - **Audio effects** — 14 per-track sound effects (echo, reverb, bass boost, treble, compressor, phone, radio, low/high-pass filter, chorus, flanger, distortion, noise gate, pitch shift); speed 0.25×–4× + custom
@@ -62,7 +63,9 @@ A local **text-to-speech and video production web app** with eight tabs, served 
 | Python | 3.10+ |
 | FFmpeg | Required for Video tab and Image Video Editor export |
 | GPU | NVIDIA CUDA (optional — speeds up XTTS and Whisper) |
-| Disk | ~500 MB base · ~4 GB with XTTS v2 model |
+| Disk | ~700 MB base (includes Whisper model) · ~4 GB with XTTS v2 model |
+
+> **Note:** `openai-whisper` is included in `requirements.txt` and installed automatically. The Whisper `base` model (~140 MB) is downloaded on first use.
 
 ---
 
@@ -120,7 +123,16 @@ Stop with `Ctrl+C`.
 tts/
 ├── app.py                            # FastAPI entry point, middleware, router mounting
 ├── requirements.txt
-├── install.bat / run.bat / add_voices_admin.bat
+├── install.bat / run.bat / add_voices_admin.bat / install_xtts.bat
+├── README.md                         # This file
+├── DOCUMENTATION.md                  # Full Russian-language reference documentation
+│
+├── docs/
+│   ├── architecture.md               # Backend routers, services, frontend modules
+│   ├── api.md                        # All API endpoints and data schemas
+│   ├── user-guide.md                 # Per-tab usage guide
+│   ├── developer-guide.md            # Adding routes, tabs, SSE patterns
+│   └── EDITOR.md                     # Image Video Editor deep dive
 │
 ├── routers/
 │   ├── voices.py                     # /api/voices — voice list, saved voices CRUD
