@@ -38,8 +38,10 @@ class ProjectBody(BaseModel):
     audio:           list = []
     subtitles:       list = []
     pip:             list = []
+    trackOrder:      list = []
     export_settings: dict = {}
     is_template:     bool = False
+    canvasCrop:      Optional[dict] = None
 
 
 class TemplateSaveBody(BaseModel):
@@ -94,8 +96,10 @@ async def save_project(body: ProjectBody):
         "slides": body.slides, "audio": body.audio,
         "subtitles": body.subtitles,
         "pip": body.pip,
+        "trackOrder": body.trackOrder or ["video", "audio", "subtitle", "pip"],
         "export_settings": body.export_settings,
         "is_template": body.is_template,
+        "canvasCrop": body.canvasCrop,
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)

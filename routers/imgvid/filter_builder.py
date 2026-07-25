@@ -7,7 +7,11 @@ with ``;`` and passed to FFmpeg's ``-filter_complex`` argument.
 import os
 from typing import Optional
 
-from .ffmpeg_utils import _XFADE, _EFFECTS, _start_effect_filters, _end_effect_filters
+from .ffmpeg_utils import (
+    _XFADE, _EFFECTS,
+    _start_effect_filters, _end_effect_filters, _continuous_effect_filters,
+    _KEN_BURNS_TYPES,
+)
 
 
 def build_scale_filter(width: int, height: int, fps: int) -> str:
@@ -33,14 +37,28 @@ def build_slide_filter(
     """Return the full per-slide filter string ``[i:v]<chain>[vi]``.
 
     Handles video trims/speed, image crop/scale/offset, per-slide effects,
-    and start/end motion effects.  The output label is ``[v{i}]``.
+    start/end motion effects, and optional frame position/size (frameX/Y/W/H).
+    The output label is ``[v{i}]``.
     """
     clip_type = slide.get("type", "image")
     speed = float(slide.get("speed", 1) or 1)
     trim_in = float(slide.get("trimIn", 0) or 0)
     dur = float(slide.get("duration", 3))
 
-    base_scale_f = build_scale_filter(width, height, fps)
+    # Frame position/size: place the slide in a sub-region of the canvas.
+    # Values are percentages of the output canvas dimensions.
+    frame_x_pct = float(slide.get("frameX", 0) or 0)
+    frame_y_pct = float(slide.get("frameY", 0) or 0)
+    frame_w_pct = max(1.0, float(slide.get("frameW", 100) or 100))
+    frame_h_pct = max(1.0, float(slide.get("frameH", 100) or 100))
+    has_frame = not (frame_x_pct == 0 and frame_y_pct == 0 and
+                     frame_w_pct == 100 and frame_h_pct == 100)
+
+    # Effective slide dimensions (equals full canvas when no custom frame)
+    sw = max(2, int(width  * frame_w_pct / 100) // 2 * 2) if has_frame else width
+    sh = max(2, int(height * frame_h_pct / 100) // 2 * 2) if has_frame else height
+
+    base_scale_f = build_scale_filter(sw, sh, fps)
     cur_scale_f = base_scale_f
 
     pre_parts: list[str] = []
@@ -71,11 +89,13 @@ def build_slide_filter(
             pre_parts.append(f"scale=iw*{s:.4f}:ih*{s:.4f}")
 
         if img_ox != 0 or img_oy != 0:
-            ox_px = int(width * img_ox / 100)
-            oy_px = int(height * img_oy / 100)
+            ox_px = int(sw * img_ox / 100)
+            oy_px = int(sh * img_oy / 100)
+            x_expr = f"max(1-iw,min(ow-1,(ow-iw)/2+{ox_px}))"
+            y_expr = f"max(1-ih,min(oh-1,(oh-ih)/2+{oy_px}))"
             cur_scale_f = (
-                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2+{ox_px}:(oh-ih)/2+{oy_px}:black,"
+                f"scale={sw}:{sh}:force_original_aspect_ratio=decrease,"
+                f"pad={sw}:{sh}:{x_expr}:{y_expr}:black,"
                 f"setsar=1,fps={fps},format=yuv420p"
             )
 
@@ -92,8 +112,32 @@ def build_slide_filter(
     ee_type = (end_eff.get("type") or "none").strip()
     se_dur = min(float(start_eff.get("duration") or 1.0), dur)
     ee_dur = min(float(end_eff.get("duration") or 1.0), dur)
-    parts.extend(_start_effect_filters(se_type, se_dur, dur, width, height))
-    parts.extend(_end_effect_filters(ee_type, ee_dur, dur, width, height))
+    parts.extend(_start_effect_filters(se_type, se_dur, dur, sw, sh))
+    parts.extend(_end_effect_filters(ee_type, ee_dur, dur, sw, sh))
+
+    # Place slide onto full canvas when frame position/size is non-default
+    if has_frame:
+        fx = int(width  * frame_x_pct / 100)
+        fy = int(height * frame_y_pct / 100)
+        crop_x = max(0, -fx)
+        crop_y = max(0, -fy)
+        vis_w = min(sw - crop_x, width  - max(0, fx))
+        vis_h = min(sh - crop_y, height - max(0, fy))
+        place_x = max(0, fx)
+        place_y = max(0, fy)
+        if vis_w > 1 and vis_h > 1 and place_x < width and place_y < height:
+            if crop_x > 0 or crop_y > 0 or vis_w < sw or vis_h < sh:
+                parts.append(f"crop={vis_w}:{vis_h}:{crop_x}:{crop_y}")
+            parts.append(
+                f"pad={width}:{height}:{place_x}:{place_y}:black,"
+                f"setsar=1,fps={fps},format=yuv420p"
+            )
+        else:
+            parts.append(
+                f"scale=2:2,"
+                f"pad={width}:{height}:{width}:{height}:black,"
+                f"setsar=1,fps={fps},format=yuv420p"
+            )
 
     return f"[{i}:v]{','.join(parts)}[v{i}]"
 
@@ -188,6 +232,25 @@ def build_transition_filters_fps(
     return filter_parts, prev
 
 
+def _pip_transparent_filters(filters: list) -> list:
+    """Replace black fills with transparent ones in PIP continuous-effect filters.
+
+    Called only for PIPs so that letterbox/oscillation padding is transparent
+    (showing the base video layer) instead of opaque black.
+    """
+    result = []
+    for f in filters:
+        if "pad=" in f and ":black" in f:
+            result.append("format=rgba")
+            result.append(f.replace(":black", ":black@0", 1))
+        elif "fillcolor=black" in f:
+            result.append("format=rgba")
+            result.append(f.replace("fillcolor=black", "fillcolor=black@0", 1))
+        else:
+            result.append(f)
+    return result
+
+
 def build_pip_filters(
     valid_pip: list,
     pip_input_start: int,
@@ -195,20 +258,28 @@ def build_pip_filters(
     width: int,
     height: int,
     total_dur: float,
+    fps: int = 30,
 ) -> tuple[list[str], str]:
     """Build Picture-in-Picture overlay filters and return new filter fragments + final label.
 
+    Layers are rendered in the order of *valid_pip* (first = bottom). Callers should
+    sort by the ``order`` field before calling so that higher-order PIPs end up on top.
+
     For each PIP layer the function generates:
-    1. A scale filter for the pip stream.
-    2. An optional opacity (colorchannelmixer) filter.
-    3. An overlay filter that enables the PIP only within its time window.
+    1. Trim/speed for video PIPs.
+    2. Scale to the PIP bounding box.
+    3. Optional colour-effect filters.
+    4. Optional start/end/continuous motion effects.
+    5. Optional opacity (colorchannelmixer) filter.
+    6. An overlay filter that enables the PIP only within its time window.
 
     Args:
         valid_pip:          List of PIP dicts that have ``_path`` resolved.
         pip_input_start:    FFmpeg input index of the first PIP file.
         final_video_label:  The video label to overlay onto (e.g. ``"vout_base"``).
         width, height:      Output video dimensions in pixels.
-        total_dur:          Total video duration (not used in filters, kept for future use).
+        total_dur:          Total video duration (seconds).
+        fps:                Frame rate used for zoompan / continuous effects.
 
     Returns:
         ``(filter_parts, final_label)`` where *filter_parts* is a list of new
@@ -223,41 +294,81 @@ def build_pip_filters(
         py_pct = float(pip.get("y", 5))
         pw_pct = float(pip.get("w", 30))
         ph_pct = float(pip.get("h", 20))
-        pip_start = float(pip.get("startTime", 0))
-        pip_end = float(pip.get("endTime", pip_start + 5))
+        pip_start  = float(pip.get("startTime", 0))
+        pip_end    = float(pip.get("endTime", pip_start + 5))
+        pip_dur    = max(0.001, pip_end - pip_start)
         pip_opacity = float(pip.get("opacity", 1))
-        pip_speed = float(pip.get("speed", 1) or 1)
+        pip_speed  = float(pip.get("speed", 1) or 1)
         pip_trimin = float(pip.get("trimIn", 0) or 0)
 
-        px = int(width * px_pct / 100)
+        px = int(width  * px_pct / 100)
         py = int(height * py_pct / 100)
-        pw = max(1, int(width * pw_pct / 100))
-        ph = max(1, int(height * ph_pct / 100))
+        pw = max(2, int(width  * pw_pct / 100) // 2 * 2)
+        ph = max(2, int(height * ph_pct / 100) // 2 * 2)
 
-        inp_idx = pip_input_start + pi
+        inp_idx = pip.get("_ffmpeg_idx", pip_input_start + pi)
+        pip_label_raw    = f"pip_r_{pi}"
         pip_label_scaled = f"pip_s_{pi}"
-        next_label = f"vout_pip{pi}"
+        next_label       = f"vout_pip{pi}"
 
-        # Build pip video filter chain
-        pip_vf_parts: list[str] = []
+        # ── 1. Trim / speed ──────────────────────────────────────────────────
+        pip_pre: list[str] = []
         if pip_type == "video":
             if pip_trimin > 0:
-                pip_vf_parts.append(f"trim=start={pip_trimin:.3f},setpts=PTS-STARTPTS")
+                pip_pre.append(f"trim=start={pip_trimin:.3f},setpts=PTS-STARTPTS")
             if pip_speed != 1.0:
-                pip_vf_parts.append(f"setpts={1.0 / pip_speed:.6f}*PTS")
-        pip_vf_parts.append(f"scale={pw}:{ph}")
-        filter_parts.append(f"[{inp_idx}:v]{','.join(pip_vf_parts)}[{pip_label_scaled}]")
+                pip_pre.append(f"setpts={1.0 / pip_speed:.6f}*PTS")
 
-        # Opacity filter
+        # ── 2. Continuous effect (may replace scale) ─────────────────────────
+        cont_eff        = pip.get("continuousEffect") or {}
+        cont_type       = (cont_eff.get("type") or "none").strip()
+        cont_int        = float(cont_eff.get("intensity") or 30)
+        pip_effect_speed = max(0.01, float(pip.get("effectSpeed", 1) or 1))
+        replaces_scale, cont_filters = _continuous_effect_filters(
+            cont_type, cont_int, pip_dur, pw, ph, fps, pip_type, speed=pip_effect_speed
+        )
+
+        if replaces_scale and pip_type == "image":
+            # Ken Burns: zoompan already outputs pw×ph — no separate scale needed
+            pip_parts = pip_pre + cont_filters
+        else:
+            # Convert to RGBA so the letterbox pad is transparent (shows base layer)
+            pip_parts = pip_pre + [
+                f"scale={pw}:{ph}:force_original_aspect_ratio=decrease:flags=lanczos",
+                f"format=rgba",
+                f"pad={pw}:{ph}:(ow-iw)/2:(oh-ih)/2:black@0",
+            ]
+            if cont_filters:
+                pip_parts.extend(_pip_transparent_filters(cont_filters))
+
+        # ── 3. Colour effects ────────────────────────────────────────────────
+        for ef in pip.get("effects", []):
+            et, ev = ef.get("type"), ef.get("value", 0)
+            if et in _EFFECTS and float(ev) != 0:
+                pip_parts.append(_EFFECTS[et](ev))
+
+        # ── 4. Start / end motion effects ────────────────────────────────────
+        start_eff = pip.get("startEffect") or {}
+        end_eff   = pip.get("endEffect")   or {}
+        se_type   = (start_eff.get("type") or "none").strip()
+        ee_type   = (end_eff.get("type")   or "none").strip()
+        se_dur    = max(0.001, min(float(start_eff.get("duration") or 1.0), pip_dur) / pip_effect_speed)
+        ee_dur    = max(0.001, min(float(end_eff.get("duration")   or 1.0), pip_dur) / pip_effect_speed)
+        pip_parts.extend(_start_effect_filters(se_type, se_dur, pip_dur, pw, ph))
+        pip_parts.extend(_end_effect_filters(ee_type, ee_dur, pip_dur, pw, ph))
+
+        filter_parts.append(f"[{inp_idx}:v]{','.join(pip_parts)}[{pip_label_scaled}]")
+
+        # ── 5. Opacity ───────────────────────────────────────────────────────
         pip_label_in = pip_label_scaled
-        if pip_opacity < 1.0:
+        if pip_opacity < 0.999:
             op_label = f"pip_op_{pi}"
             filter_parts.append(
                 f"[{pip_label_in}]format=rgba,colorchannelmixer=aa={pip_opacity:.3f}[{op_label}]"
             )
             pip_label_in = op_label
 
-        # Overlay with time-enable expression
+        # ── 6. Overlay ───────────────────────────────────────────────────────
         enable = f"between(t\\,{pip_start:.3f}\\,{pip_end:.3f})"
         filter_parts.append(
             f"[{current_label}][{pip_label_in}]overlay={px}:{py}:enable='{enable}'[{next_label}]"
@@ -265,6 +376,32 @@ def build_pip_filters(
         current_label = next_label
 
     return filter_parts, current_label
+
+
+def _make_safe_fonts_dir(tmp_dir: str) -> str:
+    """Create a temp dir with hard-links to only .ttf/.otf fonts.
+
+    Windows Fonts dir contains .fon bitmap fonts which crash libass during
+    directory scanning (STATUS_ACCESS_VIOLATION / exit 3221225477).
+    Hard-linking only the TrueType/OpenType fonts avoids the crash.
+    Falls back to an empty string if anything goes wrong (caller omits fontsdir).
+    """
+    try:
+        safe = os.path.join(tmp_dir, "_fonts")
+        os.makedirs(safe, exist_ok=True)
+        wdir = os.environ.get("WINDIR", "C:\\Windows")
+        src_dir = os.path.join(wdir, "Fonts")
+        if not os.path.isdir(src_dir):
+            return ""
+        for fname in os.listdir(src_dir):
+            if fname.lower().endswith((".ttf", ".otf")):
+                try:
+                    os.link(os.path.join(src_dir, fname), os.path.join(safe, fname))
+                except OSError:
+                    pass
+        return safe
+    except Exception:
+        return ""
 
 
 def build_subtitle_filter(
@@ -276,8 +413,8 @@ def build_subtitle_filter(
     """Write an ASS subtitle file and return the FFmpeg ``subtitles=`` filter string.
 
     Returns an empty string when *all_subs* is empty (no subtitles in project).
-    On Windows the path is escaped for FFmpeg's filter syntax and the Windows
-    system Fonts directory is passed as ``fontsdir``.
+    On Windows a safe fonts directory containing only .ttf/.otf fonts is used
+    to prevent libass from crashing on .fon bitmap fonts.
 
     Args:
         all_subs:  List of subtitle dicts with ``abs_start`` / ``abs_end`` keys.
@@ -298,8 +435,10 @@ def build_subtitle_filter(
 
     if os.name == "nt":
         esc = ass_path.replace("\\", "/").replace(":", "\\:")
-        wdir = os.environ.get("WINDIR", "C:\\Windows")
-        esc_fonts = (wdir + "\\Fonts").replace("\\", "/").replace(":", "\\:")
-        return f"subtitles='{esc}':fontsdir='{esc_fonts}'"
+        safe_fonts = _make_safe_fonts_dir(tmp_dir)
+        if safe_fonts:
+            esc_fonts = safe_fonts.replace("\\", "/").replace(":", "\\:")
+            return f"subtitles='{esc}':fontsdir='{esc_fonts}'"
+        return f"subtitles='{esc}'"
 
     return f"subtitles='{ass_path}'"

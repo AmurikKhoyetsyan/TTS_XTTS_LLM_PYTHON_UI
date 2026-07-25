@@ -28,8 +28,10 @@ from core.log import app_log, print_progress
 from routers.imgvid.ffmpeg_utils import (
     FFMPEG, FFPROBE,
     _EFFECTS,
+    _KEN_BURNS_TYPES,
     _compute_video_dur,
     _probe_duration_clip,
+    _continuous_effect_filters,
 )
 from routers.imgvid.codec_selector import (
     resolve_codec_name,
@@ -49,6 +51,10 @@ from routers.imgvid.filter_builder import (
 )
 
 router = APIRouter()
+
+# ── Active-export state (module-level for cancel support) ─────────────────────
+_active_export_proc: "subprocess.Popen | None" = None
+_active_export_cancel = threading.Event()
 
 # ── Directory constants ───────────────────────────────────────────────────────
 _BASE_DIR   = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -92,6 +98,7 @@ async def export_video(
     audio_bitrate: str  = Form("192k"),
     audio_sr:      str  = Form("44100"),
     audio_ch:      str  = Form("2"),
+    canvas_crop:   str  = Form(""),
 ):
     """Start an SSE-streamed video export job.
 
@@ -110,6 +117,7 @@ async def export_video(
 
     slides = project.get("slides", [])
     pip_layers_raw = project.get("pip", project.get("pipLayers", []))
+    track_order = project.get("trackOrder", ["video", "audio", "subtitle", "pip"])
 
     # ── Pre-export validation ────────────────────────────────────────────────
     if not slides:
@@ -155,9 +163,11 @@ async def export_video(
 
     def worker():
         """Background thread that builds and runs the FFmpeg export command."""
+        global _active_export_proc
+        _active_export_cancel.clear()
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                q.put(("progress", 0.03, "Подготовка…"))
+                q.put(("progress", 0.03, "Подготовка файлов…"))
 
                 # ── Resolve PIP layers ───────────────────────────────────────
                 valid_pip = []
@@ -172,7 +182,7 @@ async def export_video(
                 cmd_inputs: list[str] = []
                 for i, slide in enumerate(slides):
                     clip_type = slide.get("type", "image")
-                    dur = float(slide.get("duration", 3))
+                    dur = float(slide.get("duration", 4))
                     if clip_type == "video":
                         vp = os.path.join(CLIPS_DIR, slide.get("file", ""))
                         if not os.path.exists(vp):
@@ -196,10 +206,11 @@ async def export_video(
                         cmd_inputs += ["-i", ap]
                         valid_audio.append(track)
 
-                # Add PIP inputs after audio
+                # Add PIP inputs after audio; record the FFmpeg input index on each pip
                 _total_dur_approx = _compute_video_dur(slides)
                 pip_input_start = audio_start_idx + len(valid_audio)
-                for pip in valid_pip:
+                for pi, pip in enumerate(valid_pip):
+                    pip["_ffmpeg_idx"] = pip_input_start + pi
                     pip_type = pip.get("type", "image")
                     pip_path = pip["_path"]
                     if pip_type == "video":
@@ -208,16 +219,26 @@ async def export_video(
                         cmd_inputs += ["-loop", "1", "-t", f"{_total_dur_approx:.3f}", "-i", pip_path]
 
                 # ── Per-slide filters ────────────────────────────────────────
-                q.put(("progress", 0.07, "Применение эффектов…"))
-                scale_f = build_scale_filter(width, height, fps)
+                q.put(("progress", 0.07, "Создание фильтров эффектов…"))
                 filter_parts: list[str] = []
 
                 for i, slide in enumerate(slides):
                     clip_type = slide.get("type", "image")
                     speed = float(slide.get("speed", 1) or 1)
                     trim_in = float(slide.get("trimIn", 0) or 0)
-                    dur = float(slide.get("duration", 3))
+                    dur = float(slide.get("duration", 4))
 
+                    # Frame position/size
+                    frame_x_pct = float(slide.get("frameX", 0) or 0)
+                    frame_y_pct = float(slide.get("frameY", 0) or 0)
+                    frame_w_pct = max(1.0, float(slide.get("frameW", 100) or 100))
+                    frame_h_pct = max(1.0, float(slide.get("frameH", 100) or 100))
+                    has_frame = not (frame_x_pct == 0 and frame_y_pct == 0 and
+                                     frame_w_pct == 100 and frame_h_pct == 100)
+                    sw = max(2, int(width  * frame_w_pct / 100) // 2 * 2) if has_frame else width
+                    sh = max(2, int(height * frame_h_pct / 100) // 2 * 2) if has_frame else height
+
+                    scale_f = build_scale_filter(sw, sh, fps)
                     pre_parts: list[str] = []
                     cur_scale_f = scale_f
 
@@ -246,35 +267,106 @@ async def export_video(
                             pre_parts.append(f"scale=iw*{s:.4f}:ih*{s:.4f}")
 
                         if img_ox != 0 or img_oy != 0:
-                            ox_px = int(width * img_ox / 100)
-                            oy_px = int(height * img_oy / 100)
+                            ox_px = int(sw * img_ox / 100)
+                            oy_px = int(sh * img_oy / 100)
+                            # Clamp x/y so the image always stays at least 1 px visible.
+                            # Without clamping, an offset of ±100 % produces an all-black frame
+                            # because pad places the image completely outside the canvas bounds.
+                            x_expr = f"max(1-iw,min(ow-1,(ow-iw)/2+{ox_px}))"
+                            y_expr = f"max(1-ih,min(oh-1,(oh-ih)/2+{oy_px}))"
                             cur_scale_f = (
-                                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                                f"pad={width}:{height}:(ow-iw)/2+{ox_px}:(oh-ih)/2+{oy_px}:black,"
+                                f"scale={sw}:{sh}:force_original_aspect_ratio=decrease,"
+                                f"pad={sw}:{sh}:{x_expr}:{y_expr}:black,"
                                 f"setsar=1,fps={fps},format=yuv420p"
                             )
 
-                    parts = pre_parts + [cur_scale_f]
+                    cont_eff     = slide.get("continuousEffect") or {}
+                    cont_type    = (cont_eff.get("type") or "none").strip()
+                    cont_int     = float(cont_eff.get("intensity") or 30)
+                    effect_speed = max(0.01, float(slide.get("effectSpeed", 1) or 1))
+
+                    replaces_scale, cont_filters = _continuous_effect_filters(
+                        cont_type, cont_int, dur, sw, sh, fps, clip_type,
+                        speed=effect_speed,
+                    )
+
+                    if replaces_scale and clip_type == "image":
+                        parts = pre_parts + cont_filters
+                    else:
+                        parts = pre_parts + [cur_scale_f]
 
                     for ef in slide.get("effects", []):
                         et, ev = ef.get("type"), ef.get("value", 0)
                         if et in _EFFECTS and float(ev) != 0:
                             parts.append(_EFFECTS[et](ev))
 
+                    if not replaces_scale and cont_filters:
+                        parts.extend(cont_filters)
+
                     from routers.imgvid.ffmpeg_utils import _start_effect_filters, _end_effect_filters
                     start_eff = slide.get("startEffect") or {}
                     end_eff   = slide.get("endEffect")   or {}
                     se_type   = (start_eff.get("type") or "none").strip()
                     ee_type   = (end_eff.get("type")   or "none").strip()
-                    se_dur    = min(float(start_eff.get("duration") or 1.0), dur)
-                    ee_dur    = min(float(end_eff.get("duration")   or 1.0), dur)
-                    parts.extend(_start_effect_filters(se_type, se_dur, dur, width, height))
-                    parts.extend(_end_effect_filters(ee_type, ee_dur, dur, width, height))
+                    se_dur    = max(0.001, min(float(start_eff.get("duration") or 1.0), dur) / effect_speed)
+                    ee_dur    = max(0.001, min(float(end_eff.get("duration")   or 1.0), dur) / effect_speed)
+                    parts.extend(_start_effect_filters(se_type, se_dur, dur, sw, sh))
+                    parts.extend(_end_effect_filters(ee_type, ee_dur, dur, sw, sh))
+
+                    # Place slide onto full canvas when frame position/size is non-default
+                    if has_frame:
+                        fx = int(width  * frame_x_pct / 100)
+                        fy = int(height * frame_y_pct / 100)
+                        crop_x = max(0, -fx)
+                        crop_y = max(0, -fy)
+                        vis_w = min(sw - crop_x, width  - max(0, fx))
+                        vis_h = min(sh - crop_y, height - max(0, fy))
+                        place_x = max(0, fx)
+                        place_y = max(0, fy)
+                        # Only add crop+pad when the slide overlaps the visible canvas area.
+                        # If vis_w/h ≤ 0 the frame is entirely off-canvas; produce a black
+                        # canvas-sized frame so the concat/transition chain sees the right size.
+                        if vis_w > 1 and vis_h > 1 and place_x < width and place_y < height:
+                            if crop_x > 0 or crop_y > 0 or vis_w < sw or vis_h < sh:
+                                parts.append(f"crop={vis_w}:{vis_h}:{crop_x}:{crop_y}")
+                            parts.append(
+                                f"pad={width}:{height}:{place_x}:{place_y}:black,"
+                                f"setsar=1,fps={fps},format=yuv420p"
+                            )
+                        else:
+                            parts.append(
+                                f"scale=2:2,"
+                                f"pad={width}:{height}:{width}:{height}:black,"
+                                f"setsar=1,fps={fps},format=yuv420p"
+                            )
 
                     filter_parts.append(f"[{i}:v]{','.join(parts)}[v{i}]")
 
+                # ── Canvas crop (parse early so PIP/subtitle use cropped dims) ─
+                pip_canvas_w, pip_canvas_h = width, height
+                has_canvas_crop = False
+                cc_x = cc_y = cc_w_val = cc_h_val = 0
+                if canvas_crop:
+                    try:
+                        _cc = [int(v) for v in canvas_crop.split(",")]
+                        if len(_cc) == 4:
+                            _cx, _cy, _cw, _ch = _cc
+                            if _cw > 0 and _ch > 0:
+                                _cx = max(0, min(_cx, width - 1))
+                                _cy = max(0, min(_cy, height - 1))
+                                _cw = max(2, min(_cw, width  - _cx))
+                                _ch = max(2, min(_ch, height - _cy))
+                                _cw = _cw // 2 * 2
+                                _ch = _ch // 2 * 2
+                                if _cw > 0 and _ch > 0:
+                                    cc_x, cc_y, cc_w_val, cc_h_val = _cx, _cy, _cw, _ch
+                                    pip_canvas_w, pip_canvas_h = _cw, _ch
+                                    has_canvas_crop = True
+                    except Exception:
+                        pass
+
                 # ── Subtitles ────────────────────────────────────────────────
-                q.put(("progress", 0.10, "Подготовка субтитров…"))
+                q.put(("progress", 0.10, "Рендеринг субтитров…"))
                 all_subs: list[dict] = []
                 top_subs = project.get("subtitles", [])
                 video_dur = _compute_video_dur(slides)
@@ -297,22 +389,60 @@ async def export_video(
                                 all_subs.append({**sub, "abs_start": a_start, "abs_end": a_end})
                         t_cur += dur
 
-                sub_filter = build_subtitle_filter(all_subs, tmp, width, height)
+                sub_filter = build_subtitle_filter(all_subs, tmp, pip_canvas_w, pip_canvas_h)
 
                 # ── Transitions ──────────────────────────────────────────────
-                q.put(("progress", 0.12, "Сборка переходов…"))
+                q.put(("progress", 0.12, "Обработка переходов…"))
                 filter_parts, last = build_transition_filters_fps(slides, filter_parts, fps)
 
-                if sub_filter:
-                    filter_parts.append(f"[{last}]{sub_filter}[vout_base]")
-                else:
-                    filter_parts.append(f"[{last}]null[vout_base]")
+                filter_parts.append(f"[{last}]null[vout_base]")
 
-                # ── PIP overlays ─────────────────────────────────────────────
-                pip_filters, final_video_label = build_pip_filters(
-                    valid_pip, pip_input_start, "vout_base", width, height, _compute_video_dur(slides)
-                )
-                filter_parts.extend(pip_filters)
+                # Apply canvas_crop before PIP so PIP percentage coords match
+                # the cropped preview (PIP wrappers are children of the cropped
+                # preview area, not the full canvas).
+                pip_base_label = "vout_base"
+                if has_canvas_crop:
+                    filter_parts.append(
+                        f"[vout_base]crop={cc_w_val}:{cc_h_val}:{cc_x}:{cc_y}[vout_cropped_base]"
+                    )
+                    pip_base_label = "vout_cropped_base"
+
+                # ── PIP + Subtitle layer order from trackOrder ───────────────
+                # Lower index in trackOrder = higher visual position = rendered on top.
+                # Default (when not specified): subtitle on top of PIP.
+                sorted_pip = sorted(valid_pip, key=lambda p: float(p.get("order", 0)))
+                pip_idx = track_order.index("pip") if "pip" in track_order else 3
+                sub_idx = track_order.index("subtitle") if "subtitle" in track_order else 2
+                pip_on_top = pip_idx < sub_idx  # pip closer to index 0 = higher layer
+
+                if pip_on_top:
+                    # Apply subtitle first, then PIP on top
+                    if sub_filter:
+                        sub_base = f"vout_sub_base"
+                        filter_parts.append(f"[{pip_base_label}]{sub_filter}[{sub_base}]")
+                        pip_filters, pip_out_label = build_pip_filters(
+                            sorted_pip, pip_input_start, sub_base, pip_canvas_w, pip_canvas_h,
+                            _compute_video_dur(slides), fps,
+                        )
+                    else:
+                        pip_filters, pip_out_label = build_pip_filters(
+                            sorted_pip, pip_input_start, pip_base_label, pip_canvas_w, pip_canvas_h,
+                            _compute_video_dur(slides), fps,
+                        )
+                    filter_parts.extend(pip_filters)
+                    final_video_label = pip_out_label
+                else:
+                    # Apply PIP first, then subtitle on top (default)
+                    pip_filters, pip_out_label = build_pip_filters(
+                        sorted_pip, pip_input_start, pip_base_label, pip_canvas_w, pip_canvas_h,
+                        _compute_video_dur(slides), fps,
+                    )
+                    filter_parts.extend(pip_filters)
+                    if sub_filter:
+                        final_video_label = "vout_sub"
+                        filter_parts.append(f"[{pip_out_label}]{sub_filter}[{final_video_label}]")
+                    else:
+                        final_video_label = pip_out_label
 
                 # ── Audio ────────────────────────────────────────────────────
                 audio_map: list[str] = []
@@ -384,40 +514,102 @@ async def export_video(
                 print(flush=True)
                 q.put(("progress", 0.15, "Запуск FFmpeg…"))
 
+                import time as _time
+                import threading as _threading
+
                 proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL, bufsize=0,
                     creationflags=_NO_WIN,
                 )
+                _active_export_proc = proc
 
-                buf = b""
+                MAX_EXPORT_SECONDS = 1800  # 30 min hard timeout
+                STALL_SECONDS = 120        # 2 min stall timeout
+
+                def fmt_time(secs: float) -> str:
+                    m, s = divmod(int(secs), 60)
+                    return f"{m}:{s:02d}"
+
+                _stdout_q: queue.Queue = queue.Queue()
+                _stdout_done = _threading.Event()
+
+                def _read_stdout():
+                    try:
+                        while True:
+                            chunk = proc.stdout.read(1024)
+                            if not chunk:
+                                break
+                            _stdout_q.put(chunk)
+                    finally:
+                        _stdout_done.set()
+
+                _reader = _threading.Thread(target=_read_stdout, daemon=True)
+                _reader.start()
+
+                _start_t = _time.monotonic()
+                _last_len = 0
+                _last_stall_check = _time.monotonic()
                 all_ffmpeg_lines: list[str] = []
-                while True:
-                    chunk = proc.stdout.read(1024)
-                    if not chunk:
-                        break
-                    buf += chunk
-                    parts2 = re.split(rb"\r\n|\r|\n", buf)
-                    buf = parts2[-1]
-                    for raw in parts2[:-1]:
-                        line = raw.decode("utf-8", errors="replace").strip()
-                        if not line:
-                            continue
-                        all_ffmpeg_lines.append(line)
-                        if "time=" in line and total_dur > 0:
-                            try:
-                                ts2 = line.split("time=")[1].split()[0]
-                                if ":" in ts2 and not ts2.startswith("-"):
-                                    hh, mm, ss2 = ts2.split(":")
-                                    done = int(hh) * 3600 + int(mm) * 60 + float(ss2)
-                                    pct = int(min(95, 15 + done / total_dur * 80))
-                                    q.put(("progress", pct / 100, line))
-                                    print_progress(pct, "FFmpeg")
-                            except Exception:
-                                pass
+                buf = b""
 
-                proc.wait()
+                while not _stdout_done.is_set():
+                    now = _time.monotonic()
+                    if _active_export_cancel.is_set():
+                        proc.kill()
+                        _stdout_done.wait(3)
+                        q.put(("cancelled", "Export cancelled by user"))
+                        return
+                    if now - _start_t > MAX_EXPORT_SECONDS:
+                        proc.kill()
+                        _stdout_done.wait(5)
+                        q.put(("error", f"Таймаут экспорта (>{MAX_EXPORT_SECONDS//60} мин)"))
+                        return
+                    # Drain buffered output
+                    while not _stdout_q.empty():
+                        try:
+                            chunk = _stdout_q.get_nowait()
+                        except queue.Empty:
+                            break
+                        buf += chunk
+                        parts2 = re.split(rb"\r\n|\r|\n", buf)
+                        buf = parts2[-1]
+                        for raw in parts2[:-1]:
+                            line = raw.decode("utf-8", errors="replace").strip()
+                            if not line:
+                                continue
+                            all_ffmpeg_lines.append(line)
+                            if "time=" in line and total_dur > 0:
+                                try:
+                                    ts2 = line.split("time=")[1].split()[0]
+                                    if ":" in ts2 and not ts2.startswith("-"):
+                                        hh, mm, ss2 = ts2.split(":")
+                                        done = int(hh) * 3600 + int(mm) * 60 + float(ss2)
+                                        pct = int(min(95, 15 + done / total_dur * 80))
+                                        q.put(("progress", pct / 100, f"Рендеринг: {fmt_time(done)}/{fmt_time(total_dur)}"))
+                                        print_progress(pct, "FFmpeg")
+                                        _last_stall_check = _time.monotonic()
+                                except Exception:
+                                    pass
+                    # Check for stall (no new output for STALL_SECONDS)
+                    cur_len = len(all_ffmpeg_lines)
+                    if cur_len > _last_len:
+                        _last_len = cur_len
+                        _last_stall_check = _time.monotonic()
+                    elif _time.monotonic() - _last_stall_check > STALL_SECONDS:
+                        proc.kill()
+                        _stdout_done.wait(5)
+                        q.put(("error", f"FFmpeg завис (нет вывода {STALL_SECONDS}с). Проверьте эффекты и параметры."))
+                        return
+                    _stdout_done.wait(0.5)
+
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    q.put(("error", "FFmpeg не завершился после окончания вывода"))
+                    return
                 if proc.returncode != 0:
                     print(flush=True)
                     tail = "\n".join(all_ffmpeg_lines[-30:])
@@ -446,6 +638,8 @@ async def export_video(
             import traceback
             app_log(f"Export error: {traceback.format_exc()}", "ERROR", "ImgVid")
             q.put(("error", str(e)))
+        finally:
+            _active_export_proc = None
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -465,8 +659,35 @@ async def export_video(
             elif ev == "error":
                 yield f"event: error\ndata: {json.dumps({'status': '❌ ' + item[1]})}\n\n"
                 break
+            elif ev == "cancelled":
+                app_log("Export cancelled by user", "INFO", "ImgVid")
+                yield f"event: cancelled\ndata: {json.dumps({'status': item[1]})}\n\n"
+                break
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+# ── /cancel-export ───────────────────────────────────────────────────────────
+
+@router.post("/cancel-export")
+async def cancel_export():
+    """Signal the active FFmpeg export to stop and kill its process."""
+    global _active_export_proc
+    _active_export_cancel.set()
+    proc = _active_export_proc
+    if proc and proc.poll() is None:
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True, timeout=5,
+                )
+            else:
+                proc.kill()
+        except Exception:
+            pass
+    app_log("Export cancelled by user", "INFO", "ImgVid")
+    return {"ok": True}
 
 
 # ── /export-audio ─────────────────────────────────────────────────────────────
