@@ -5937,7 +5937,19 @@ export async function init() {
             const _t = S.currentTime;
             const activeSub = S.subtitles.find(s => _t >= (s.start || 0) && _t <= (s.end ?? 3))
                 || (clip.subtitles || []).find(s => local >= (s.start || 0) && local <= (s.end ?? clip.duration));
-            if (activeSub?.text) _drawSubtitleOnCanvas(ctx, activeSub, cw, ch);
+            if (activeSub?.text) {
+                // sub.x/y are % of the crop viewport; fontSize/outline are at full resH scale
+                let subOx = 0, subOy = 0, subVw = cw, subVh = ch, subSc = 1;
+                if (S.canvasCrop) {
+                    const c  = S.canvasCrop;
+                    const sx = cw / (c.resW || cw);
+                    const sy = ch / (c.resH || ch);
+                    subOx  = c.x * sx;  subOy  = c.y * sy;
+                    subVw  = c.w * sx;  subVh  = c.h * sy;
+                    subSc  = subVh / ch;
+                }
+                _drawSubtitleOnCanvas(ctx, activeSub, subOx, subOy, subVw, subVh, subSc);
+            }
 
             // Apply canvas crop if set
             let outCanvas = canvas;
@@ -5966,37 +5978,42 @@ export async function init() {
         }
     }
 
-    function _drawSubtitleOnCanvas(ctx, sub, cw, ch) {
-        const fontSize   = sub.fontSize || 40;
+    // originX/Y = top-left of crop in full-canvas pixels (0,0 if no crop)
+    // viewW/H   = crop viewport size in full-canvas pixels (=cw/ch if no crop)
+    // sc        = viewH / fullCanvasH — scales fontSize, outline, padding to match the crop viewport
+    function _drawSubtitleOnCanvas(ctx, sub, originX, originY, viewW, viewH, sc) {
+        const fontSize   = (sub.fontSize || 40) * sc;
         const fontFamily = sub.fontFamily || 'Arial';
         const fw = sub.bold   ? 'bold'   : 'normal';
         const fi = sub.italic ? 'italic' : 'normal';
-        ctx.font        = `${fi} ${fw} ${fontSize}px "${fontFamily}", sans-serif`;
-        ctx.textAlign   = sub.align || 'center';
+        ctx.font         = `${fi} ${fw} ${fontSize}px "${fontFamily}", sans-serif`;
+        ctx.textAlign    = sub.align || 'center';
         ctx.textBaseline = 'middle';
 
-        const x = (sub.x ?? 50) / 100 * cw;
-        const y = (sub.y ?? 88) / 100 * ch;
-        const lines = sub.text.split('\n');
-        const lineH = fontSize * (sub.lineHeight || 1.35);
+        const x = originX + (sub.x ?? 50) / 100 * viewW;
+        const y = originY + (sub.y ?? 88) / 100 * viewH;
+        const lines  = sub.text.split('\n');
+        const lineH  = fontSize * (sub.lineHeight || 1.35);
         const startY = y - (lines.length - 1) * lineH / 2;
 
         // Background box
         const bgOp = sub.bgOpacity ?? 0;
         if (bgOp > 0) {
-            const padX = sub.bgPadX ?? 12, padY = sub.bgPadY ?? 6;
+            const padX = (sub.bgPadX ?? 12) * sc;
+            const padY = (sub.bgPadY ?? 6)  * sc;
+            const rx   = (sub.bgRadius ?? 4) * sc;
             const maxW = Math.max(...lines.map(l => ctx.measureText(l).width));
             const bx = x - maxW / 2 - padX, by = startY - lineH / 2 - padY;
             const bw = maxW + padX * 2,      bh = lines.length * lineH + padY * 2;
             ctx.fillStyle = hexToRgba(sub.bgColor || '#000000', bgOp);
             ctx.beginPath();
-            if (ctx.roundRect) ctx.roundRect(bx, by, bw, bh, sub.bgRadius ?? 4);
+            if (ctx.roundRect) ctx.roundRect(bx, by, bw, bh, rx);
             else ctx.rect(bx, by, bw, bh);
             ctx.fill();
         }
 
         // Outline stroke
-        const outline = sub.outline ?? 2;
+        const outline = (sub.outline ?? 2) * sc;
         if (outline > 0) {
             ctx.strokeStyle = sub.outlineColor || '#000000';
             ctx.lineWidth   = outline * 2;
