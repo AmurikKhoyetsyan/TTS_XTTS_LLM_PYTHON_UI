@@ -844,7 +844,7 @@
                             <div id="ive-media-list" class="ive-media-list"></div>
                             <div class="ive-global-dur-row">
                                 <label style="flex:1;font-size:11px">Длит. (с)</label>
-                                <input class="ive-input" type="number" id="ive-global-dur" min="0.5" max="60" step="0.5" value="3" style="width:80px">
+                                <input class="ive-input" type="number" id="ive-global-dur" min="0.5" max="60" step="0.5" value="4" style="width:80px">
                                 <button class="btn btn-sm" id="ive-apply-dur-btn">↻</button>
                             </div>
                         </div>
@@ -867,12 +867,39 @@
                             <div id="ive-trans-overlay" style="display:none;position:absolute;z-index:9;pointer-events:none;background:#000;"></div>
                             <!-- Zoom-able content layer -->
                             <div id="ive-preview-content" class="ive-preview-content" style="position:relative;z-index:2">
-                                <img    id="ive-preview-img"   style="display:none" alt="">
-                                <video  id="ive-preview-video" style="display:none" muted playsinline></video>
+                                <div id="ive-preview-media-wrap" style="position:absolute;inset:0;overflow:hidden">
+                                    <img    id="ive-preview-img"   style="display:none" alt="">
+                                    <video  id="ive-preview-video" style="display:none" muted playsinline></video>
+                                </div>
                             </div>
                             <!-- Subtitle container — always above transitions, outside preview-content -->
                             <div id="ive-sub-container" style="display:none;position:absolute;z-index:20;pointer-events:none">
                                 <div class="ive-sub-overlay" id="ive-sub-overlay" style="display:none"></div>
+                            </div>
+                            <!-- Floating crop button — stable position regardless of transport bar -->
+                            <button id="ive-crop-btn" class="ive-crop-float-btn" title="Кроп канваса — выбрать область">✂ Кроп</button>
+                            <!-- Canvas crop overlay -->
+                            <div id="ive-crop-ov" class="ive-crop-ov" style="display:none;position:absolute;z-index:50">
+                                <div id="ive-cov-t" class="ive-cov-mask"></div>
+                                <div id="ive-cov-b" class="ive-cov-mask"></div>
+                                <div id="ive-cov-l" class="ive-cov-mask"></div>
+                                <div id="ive-cov-r" class="ive-cov-mask"></div>
+                                <div id="ive-crop-sel" class="ive-crop-sel">
+                                    <div class="ive-ch" data-ch="nw"></div>
+                                    <div class="ive-ch" data-ch="n"></div>
+                                    <div class="ive-ch" data-ch="ne"></div>
+                                    <div class="ive-ch" data-ch="w"></div>
+                                    <div class="ive-ch" data-ch="e"></div>
+                                    <div class="ive-ch" data-ch="sw"></div>
+                                    <div class="ive-ch" data-ch="s"></div>
+                                    <div class="ive-ch" data-ch="se"></div>
+                                    <span id="ive-crop-dims-lbl" class="ive-crop-dims-lbl"></span>
+                                </div>
+                                <div class="ive-crop-toolbar" id="ive-crop-toolbar">
+                                    <button class="ive-ctb-apply" id="ive-ccrop-ok">✓ Применить</button>
+                                    <button class="ive-ctb-cancel" id="ive-crop-cancel-btn">Отмена</button>
+                                    <button class="ive-ctb-reset" id="ive-crop-full-btn">✕ Сбросить</button>
+                                </div>
                             </div>
                             <div class="ive-preview-empty" id="ive-preview-empty">
                                 <div>Добавьте медиафайлы</div>
@@ -900,7 +927,7 @@
                                 <select class="ive-zoom-mode-sel" id="ive-zoom-mode">
                                     <option value="fit">Fit</option>
                                     <option value="original">100%</option>
-                                    <option value="custom">Custom</option>
+                                    <option value="cover">Cover</option>
                                 </select>
                                 <span class="ive-zoom-display" id="ive-zoom-display">Fit</span>
                                 <input type="number" class="ive-zoom-pct-input" id="ive-zoom-pct" min="10" max="800" step="5" value="100" style="display:none">
@@ -924,10 +951,10 @@
                             <div class="ive-track-labels-col" id="ive-track-labels-col">
                                 <div class="ive-ruler-lbl-space"></div>
                                 <div class="ive-labels-scroll" id="ive-labels-scroll">
-                                    <div class="ive-track-lbl" id="ive-video-lbl">VIDEO</div>
-                                    <div class="ive-track-lbl" id="ive-audio-lbl">AUDIO</div>
-                                    <div class="ive-track-lbl" id="ive-subs-lbl">SUBS</div>
-                                    <div class="ive-track-lbl" id="ive-pip-lbl">PIP</div>
+                                    <div class="ive-track-lbl" id="ive-video-lbl">Clip 1</div>
+                                    <div class="ive-track-lbl" id="ive-audio-lbl">Audio 1</div>
+                                    <div class="ive-track-lbl" id="ive-subs-lbl">Subtitle 1</div>
+                                    <div class="ive-track-lbl" id="ive-pip-lbl">PIP 1</div>
                                 </div>
                             </div>
                             <!-- Scrollable track area -->
@@ -937,7 +964,7 @@
                                     <div class="ive-track-row ive-video-row" id="ive-video-track"></div>
                                     <div class="ive-audio-rows"  id="ive-audio-track"></div>
                                     <div class="ive-track-row ive-subs-row"  id="ive-subtitle-track"></div>
-                                    <div class="ive-track-row ive-pip-row"   id="ive-pip-track"></div>
+                                    <div class="ive-track-row" id="ive-pip-track"></div>
                                     <div class="ive-playhead" id="ive-playhead" style="display:none"></div>
                                 </div>
                             </div>
@@ -965,6 +992,7 @@
                                     <span id="ive-prog-pct" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--text-dim)">0%</span>
                                 </div>
                                 <span class="status" id="ive-export-status"></span>
+                                <button id="ive-cancel-export-btn" class="btn btn-sm" style="display:none;background:rgba(239,68,68,.15);color:#ef4444;border-color:rgba(239,68,68,.3);white-space:nowrap" title="Отменить экспорт">&#10005; Отменить</button>
                             </div>
                         </div>
                     </div>

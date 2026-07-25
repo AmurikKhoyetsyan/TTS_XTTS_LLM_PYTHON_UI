@@ -5,7 +5,7 @@ import { openConfirm, openPrompt } from '../modal.js';
 import { ICONS }           from '../icons.js';
 import { events }          from '../events.js';
 
-import { TRANSITIONS, EFFECTS_DEF, FONTS, ANIMS, START_EFFECTS, END_EFFECTS } from '../imgvid/constants.js';
+import { TRANSITIONS, EFFECTS_DEF, FONTS, ANIMS, START_EFFECTS, END_EFFECTS, CONTINUOUS_EFFECTS, PIP_START_EFFECTS, PIP_END_EFFECTS, PIP_CONTINUOUS_EFFECTS } from '../imgvid/constants.js';
 import { uid, eh, fmt, fmtShort, buildCSSFilter, hexToRgba, _makeTextShadow, getSnapTargets, snap } from '../imgvid/utils.js';
 import { totalDur as _totalDurFn, clipAtTime as _clipAtTimeFn } from '../imgvid/utils.js';
 import { drawWaveform, probeAudioDuration } from '../imgvid/waveform.js';
@@ -28,10 +28,15 @@ const S = {
     previewZoom: 1.0,     // actual CSS scale factor
     // PIP layers
     pipLayers: [],
+    audioLanes: [],
+    // Track display order: first = topmost visual row = highest render layer
+    trackOrder: ['video', 'audio', 'subtitle', 'pip'],
     // Preview dimensions (set by _updatePreviewSize, used for subtitle scaling)
     previewH: 0, previewW: 0,
     // Template edit mode
     isTemplateMode: false, editingTemplateId: null,
+    // Canvas crop: {x, y, w, h} in canvas pixels, or null for full canvas
+    canvasCrop: null,
 };
 
 // ── Undo/Redo history ────────────────────────────────────────────────────────
@@ -85,6 +90,14 @@ export async function init() {
     const _getSnapTargets = (excludeIdx, type) => getSnapTargets(S, excludeIdx, type);
     const _snap = snap;
     const _probeAudioDuration = probeAudioDuration;
+    // Total project duration including audio tracks that extend beyond slides
+    const _extTotal = () => {
+        const audioEnd = S.audioTracks.reduce((m, t) => {
+            const e = (t.startOffset || 0) + (t.duration !== undefined ? t.duration : (t.originalDuration || 0));
+            return Math.max(m, e);
+        }, 0);
+        return Math.max(totalDur(), audioEnd);
+    };
 
     const section       = document.querySelector('[data-panel="imgvid"]');
     const newBtn        = $('ive-new-btn');
@@ -103,10 +116,12 @@ export async function init() {
     const exportStatus  = $('ive-export-status');
     const progFill      = $('ive-prog-fill');
     const progPct       = $('ive-prog-pct');
+    const cancelExportBtn = $('ive-cancel-export-btn');
     // Preview
     const previewWrap   = $('ive-preview-inner').parentElement;
     const previewInner  = $('ive-preview-inner');
-    const previewContent= $('ive-preview-content');
+    const previewContent    = $('ive-preview-content');
+    const previewMediaWrap  = $('ive-preview-media-wrap');
     const previewImg    = $('ive-preview-img');
     const previewVideo  = $('ive-preview-video');
     const previewEmpty  = $('ive-preview-empty');
@@ -139,6 +154,7 @@ export async function init() {
     const playheadEl    = $('ive-playhead');
     const timeRulerEl   = $('ive-time-ruler');
     const audioLblEl    = $('ive-audio-lbl');
+    const pipLblEl      = $('ive-pip-lbl');
     const labelsScroll  = $('ive-labels-scroll');
     const propsBody     = $('ive-props-body');
     const trimBtn       = $('ive-trim-btn');
@@ -150,6 +166,19 @@ export async function init() {
     // PIP
     const addPipBtn   = $('ive-add-pip-btn');
     const pipInput    = $('ive-pip-input');
+
+    // Canvas crop controls
+    const cropBtn       = $('ive-crop-btn');
+    const cropOv        = $('ive-crop-ov');
+    const cropSel       = $('ive-crop-sel');
+    const cropMaskT     = $('ive-cov-t');
+    const cropMaskB     = $('ive-cov-b');
+    const cropMaskL     = $('ive-cov-l');
+    const cropMaskR     = $('ive-cov-r');
+    const cropDimsLbl   = $('ive-crop-dims-lbl');
+    const cropOkBtn     = $('ive-ccrop-ok');
+    const cropCancelBtn = $('ive-crop-cancel-btn');
+    const cropFullBtn   = $('ive-crop-full-btn');
 
     // .amur buttons
     const saveAmurBtn        = $('ive-save-amur-btn');
@@ -305,25 +334,20 @@ export async function init() {
     playPauseBtn.addEventListener('click', _togglePlay);
     stopBtn.addEventListener('click',      () => { _stopPlayback(); _seek(0); });
     fwdBtn.addEventListener('click',    () => _seek(S.currentTime + 5));
-    goEnd.addEventListener('click',     () => _seek(totalDur()));
+    goEnd.addEventListener('click',     () => _seek(_extTotal()));
 
     seekBar.addEventListener('input', () => {
-        _seek((parseFloat(seekBar.value) / 10000) * totalDur());
+        _seek((parseFloat(seekBar.value) / 10000) * _extTotal());
     });
 
     // ── Preview zoom ──────────────────────────────────────────────────────────
     zoomMode.addEventListener('change', () => {
-        const mode = zoomMode.value;
-        if (mode === 'custom') {
-            _applyZoom('custom', parseFloat(zoomPct.value) || 100);
-        } else {
-            _applyZoom(mode, 100);
-        }
+        _applyZoom(zoomMode.value, 100);
     });
 
     zoomPct.addEventListener('input', () => {
-        if (S.previewMode === 'custom') {
-            previewContent.style.transformOrigin = '';  // center for manual input
+        if (S.previewMode !== 'fit' && S.previewMode !== 'original' && S.previewMode !== 'cover') {
+            previewContent.style.transformOrigin = '';
             _applyZoom('custom', parseFloat(zoomPct.value) || 100);
         }
     });
@@ -349,8 +373,215 @@ export async function init() {
         // Set pivot before scaling so the point under cursor stays fixed
         previewContent.style.transformOrigin = `${pctX.toFixed(2)}% ${pctY.toFixed(2)}%`;
         _applyZoom('custom', newPct);
-        zoomMode.value = 'custom';
     }, { passive: false });
+
+    // ── Canvas crop overlay ────────────────────────────────────────────────────
+    let _cropDraft     = null;  // {x,y,w,h} in canvas pixels, being edited
+    let _cropPrevCrop  = null;  // saved S.canvasCrop before entering crop mode
+    let _cropDragMode  = null;  // 'draw' | 'move' | 'resize-nw' | ...
+    let _cropDragStart = null;  // {mx, my} in canvas pixels at drag start
+    let _cropDragInit  = null;  // {x,y,w,h} snapshot at drag start
+
+    function _cropCanvasRes() {
+        const { w, h } = expModal.getResolution();
+        return { resW: w || 1920, resH: h || 1080 };
+    }
+
+    function _cancelCropMode() {
+        if (!cropOv || cropOv.style.display === 'none') return;
+        cropOv.style.display = 'none';
+        _cropDraft = null; _cropPrevCrop = null; _cropDragMode = null;
+    }
+
+    function _showCropOverlay() {
+        _cropPrevCrop = S.canvasCrop;
+        S.canvasCrop  = null;
+        _updatePreviewSize();
+
+        // Position overlay to match previewContent within previewInner
+        const cRect = previewContent.getBoundingClientRect();
+        const iRect = previewInner.getBoundingClientRect();
+        cropOv.style.left   = (cRect.left - iRect.left) + 'px';
+        cropOv.style.top    = (cRect.top  - iRect.top)  + 'px';
+        cropOv.style.width  = cRect.width  + 'px';
+        cropOv.style.height = cRect.height + 'px';
+
+        const { resW, resH } = _cropCanvasRes();
+        _cropDraft = _cropPrevCrop
+            ? { ..._cropPrevCrop }
+            : { x: 0, y: 0, w: resW, h: resH };
+
+        cropOv.style.display = 'block';
+        cropBtn.classList.add('ive-crop-active');
+        _updateCropOverlayUI();
+    }
+
+    function _updateCropOverlayUI() {
+        if (!_cropDraft || !cropOv || cropOv.style.display === 'none') return;
+        const { resW, resH } = _cropCanvasRes();
+        const ovW = parseFloat(cropOv.style.width)  || previewContent.offsetWidth;
+        const ovH = parseFloat(cropOv.style.height) || previewContent.offsetHeight;
+        const scX = ovW / resW, scY = ovH / resH;
+
+        const px = Math.round(_cropDraft.x * scX);
+        const py = Math.round(_cropDraft.y * scY);
+        const pw = Math.max(2, Math.round(_cropDraft.w * scX));
+        const ph = Math.max(2, Math.round(_cropDraft.h * scY));
+
+        cropSel.style.left   = px + 'px';
+        cropSel.style.top    = py + 'px';
+        cropSel.style.width  = pw + 'px';
+        cropSel.style.height = ph + 'px';
+
+        cropMaskT.style.cssText = `position:absolute;left:0;top:0;width:100%;height:${py}px;background:rgba(0,0,0,.62);pointer-events:auto`;
+        cropMaskB.style.cssText = `position:absolute;left:0;top:${py+ph}px;width:100%;height:${ovH-py-ph}px;background:rgba(0,0,0,.62);pointer-events:auto`;
+        cropMaskL.style.cssText = `position:absolute;left:0;top:${py}px;width:${px}px;height:${ph}px;background:rgba(0,0,0,.62);pointer-events:auto`;
+        cropMaskR.style.cssText = `position:absolute;left:${px+pw}px;top:${py}px;width:${ovW-px-pw}px;height:${ph}px;background:rgba(0,0,0,.62);pointer-events:auto`;
+
+        if (cropDimsLbl) cropDimsLbl.textContent = `${_cropDraft.w} × ${_cropDraft.h}`;
+    }
+
+    function _applyCanvasCrop() {
+        const { resW, resH } = _cropCanvasRes();
+        const { x, y, w, h } = _cropDraft;
+        S.canvasCrop = (x === 0 && y === 0 && w === resW && h === resH) ? null : { x, y, w, h, resW, resH };
+        S.dirty = true;
+        cropOv.style.display = 'none';
+        _cropDraft = null; _cropPrevCrop = null; _cropDragMode = null;
+        _updatePreviewSize();
+        cropBtn.classList.toggle('ive-crop-active', !!S.canvasCrop);
+    }
+
+    cropBtn?.addEventListener('click', () => {
+        if (cropOv && cropOv.style.display !== 'none') {
+            // Toggle off — cancel crop mode without applying
+            S.canvasCrop = _cropPrevCrop;
+            _cancelCropMode();
+            _updatePreviewSize();
+            cropBtn.classList.toggle('ive-crop-active', !!S.canvasCrop);
+        } else {
+            _showCropOverlay();
+        }
+    });
+
+    cropOkBtn?.addEventListener('click', () => _applyCanvasCrop());
+
+    cropCancelBtn?.addEventListener('click', () => {
+        S.canvasCrop = _cropPrevCrop;
+        _cancelCropMode();
+        _updatePreviewSize();
+        cropBtn.classList.toggle('ive-crop-active', !!S.canvasCrop);
+    });
+
+    cropFullBtn?.addEventListener('click', () => {
+        const { resW, resH } = _cropCanvasRes();
+        _cropDraft = { x: 0, y: 0, w: resW, h: resH };
+        _updateCropOverlayUI();
+    });
+
+    // Prevent toolbar button clicks from bubbling to cropOv and starting a draw
+    $('ive-crop-toolbar')?.addEventListener('mousedown', e => e.stopPropagation());
+
+    // ── Crop overlay mouse interaction ────────────────────────────────────────
+    cropOv?.addEventListener('mousedown', e => {
+        if (e.button !== 0) return;
+        const ch = e.target.dataset?.ch;
+        const ovRect = cropOv.getBoundingClientRect();
+        const { resW, resH } = _cropCanvasRes();
+        const scX = resW / ovRect.width, scY = resH / ovRect.height;
+        const mx  = (e.clientX - ovRect.left) * scX;
+        const my  = (e.clientY - ovRect.top)  * scY;
+        if (ch) {
+            _cropDragMode  = 'resize-' + ch;
+            _cropDragStart = { mx, my };
+            _cropDragInit  = { ..._cropDraft };
+            e.stopPropagation();
+        } else if (e.target === cropSel || cropSel.contains(e.target)) {
+            _cropDragMode  = 'move';
+            _cropDragStart = { mx, my };
+            _cropDragInit  = { ..._cropDraft };
+            e.stopPropagation();
+        } else {
+            _cropDragMode  = 'draw';
+            _cropDragStart = { mx, my };
+            _cropDraft     = { x: Math.round(mx), y: Math.round(my), w: 2, h: 2 };
+            _updateCropOverlayUI();
+        }
+        e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', e => {
+        if (!_cropDragMode || !cropOv || cropOv.style.display === 'none') return;
+        const ovRect = cropOv.getBoundingClientRect();
+        const { resW, resH } = _cropCanvasRes();
+        const scX = resW / ovRect.width, scY = resH / ovRect.height;
+        const mx  = Math.max(0, Math.min(resW, (e.clientX - ovRect.left) * scX));
+        const my  = Math.max(0, Math.min(resH, (e.clientY - ovRect.top)  * scY));
+        const dx  = mx - _cropDragStart.mx;
+        const dy  = my - _cropDragStart.my;
+        const ir  = _cropDragInit;
+
+        if (_cropDragMode === 'draw') {
+            const sx = _cropDragStart.mx, sy = _cropDragStart.my;
+            const rawW = mx - sx, rawH = my - sy;
+            let w = Math.max(2, Math.abs(rawW));
+            let h = Math.max(2, Math.abs(rawH));
+            if (e.shiftKey || e.ctrlKey) { const s = Math.min(w, h); w = s; h = s; }
+            // Anchor at start point, extend in the direction of the drag
+            const x = rawW >= 0 ? sx : sx - w;
+            const y = rawH >= 0 ? sy : sy - h;
+            _cropDraft = {
+                x: Math.max(0, Math.round(x)),
+                y: Math.max(0, Math.round(y)),
+                w, h,
+            };
+        } else if (_cropDragMode === 'move') {
+            _cropDraft = {
+                x: Math.max(0, Math.min(resW - ir.w, Math.round(ir.x + dx))),
+                y: Math.max(0, Math.min(resH - ir.h, Math.round(ir.y + dy))),
+                w: ir.w, h: ir.h,
+            };
+        } else {
+            const ch = _cropDragMode.slice(7);
+            let { x, y, w, h } = ir;
+            if (ch.includes('n')) { y = ir.y + dy; h = ir.h - dy; }
+            if (ch.includes('s')) { h = ir.h + dy; }
+            if (ch.includes('w')) { x = ir.x + dx; w = ir.w - dx; }
+            if (ch.includes('e')) { w = ir.w + dx; }
+            // Shift/Ctrl: lock aspect ratio and re-anchor position
+            if (e.shiftKey || e.ctrlKey) {
+                const ar = ir.h > 0 ? ir.w / ir.h : 1;
+                if (ch === 'n' || ch === 's') {
+                    // Edge handle vertical: adjust width, keep horizontally centered
+                    const newW = Math.round(h * ar);
+                    x = ir.x + Math.round((ir.w - newW) / 2);
+                    w = newW;
+                } else if (ch === 'w' || ch === 'e') {
+                    // Edge handle horizontal: adjust height, keep vertically centered
+                    const newH = Math.round(w / ar);
+                    y = ir.y + Math.round((ir.h - newH) / 2);
+                    h = newH;
+                } else {
+                    // Corner handle: adjust to AR then re-anchor opposite corner
+                    if (w / h > ar) { h = Math.round(w / ar); } else { w = Math.round(h * ar); }
+                    // Fixed corner is the one opposite to the dragged handle
+                    x = ch.includes('e') ? ir.x : (ir.x + ir.w) - w;
+                    y = ch.includes('s') ? ir.y : (ir.y + ir.h) - h;
+                }
+            }
+            if (w < 2) { if (ch.includes('w')) x = x + w - 2; w = 2; }
+            if (h < 2) { if (ch.includes('n')) y = y + h - 2; h = 2; }
+            x = Math.max(0, x); y = Math.max(0, y);
+            w = Math.min(w, resW - x); h = Math.min(h, resH - y);
+            _cropDraft = { x: Math.round(x), y: Math.round(y), w: Math.max(2, Math.round(w)), h: Math.max(2, Math.round(h)) };
+        }
+        _updateCropOverlayUI();
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (!_cropDragMode) return;
+        _cropDragMode = null; _cropDragStart = null; _cropDragInit = null;
+    });
 
     // ── Subtitle overlay: text element + resize handles (created once) ────────
     const subTextEl = document.createElement('span');
@@ -552,6 +783,13 @@ export async function init() {
     // ── Save / Export ─────────────────────────────────────────────────────────
     saveBtn.addEventListener('click', _saveProject);
     exportBtn.addEventListener('click', _startExport);
+    cancelExportBtn?.addEventListener('click', async () => {
+        cancelExportBtn.disabled = true;
+        cancelExportBtn.textContent = 'Отмена…';
+        try { await fetch('/api/imgvid/cancel-export', { method: 'POST' }); } catch (_) {}
+        cancelExportBtn.disabled = false;
+        cancelExportBtn.textContent = '✕ Отменить';
+    });
     $('ive-save-template-btn')?.addEventListener('click', async () => {
         if (!S.projectId) { await _saveProject(); }
         if (!S.projectId) { toast('Сначала сохраните проект', 'warn'); return; }
@@ -613,16 +851,22 @@ export async function init() {
             _stopPlayback();
             S.projectId = d.id; S.projectName = d.name;
             S.clips = d.slides || []; S.audioTracks = d.audio || [];
+            S.audioLanes = [...new Set((S.audioTracks).map(t => t.laneIndex ?? 0))];
             S.subtitles = d.subtitles || [];
             _pipEls.forEach(({ wrapper }) => { if (wrapper?.parentNode) wrapper.parentNode.removeChild(wrapper); });
             _pipEls.clear();
-            S.pipLayers = d.pip || d.pipLayers || [];
+            S.pipLayers = (d.pip || d.pipLayers || []).map(_normalizePip);
+            S.trackOrder = d.trackOrder || ['video', 'audio', 'subtitle', 'pip'];
             S.selPipIdx = -1; S.selIdxs = new Set();
             S.selIdx = S.clips.length ? 0 : -1; S.dirty = false;
+            S.canvasCrop = d.canvasCrop || null;
+            _cancelCropMode();
+            if (cropBtn) cropBtn.classList.toggle('ive-crop-active', !!S.canvasCrop);
             if ($('ive-project-name')) $('ive-project-name').value = S.projectName;
             _applyExportSettings(d.export_settings);
             _historyStack.length = 0; _historyIdx = -1; _historyMinIdx = 0;
             clearTimeout(_propsHistTimer); _propsHistTimer = null;
+            _updatePreviewSize();
             renderAll(); _pushHistory(); await loadProjectsList();
             toast('Проект загружен из .project', 'ok');
         } catch (e) { toast(e.message, 'err'); }
@@ -637,16 +881,22 @@ export async function init() {
             _stopPlayback();
             S.projectId = d.id; S.projectName = d.name;
             S.clips = d.slides || []; S.audioTracks = d.audio || [];
+            S.audioLanes = [...new Set((S.audioTracks).map(t => t.laneIndex ?? 0))];
             S.subtitles = d.subtitles || [];
             _pipEls.forEach(({ wrapper }) => { if (wrapper?.parentNode) wrapper.parentNode.removeChild(wrapper); });
             _pipEls.clear();
-            S.pipLayers = d.pip || d.pipLayers || [];
+            S.pipLayers = (d.pip || d.pipLayers || []).map(_normalizePip);
+            S.trackOrder = d.trackOrder || ['video', 'audio', 'subtitle', 'pip'];
             S.selPipIdx = -1; S.selIdxs = new Set();
             S.selIdx = S.clips.length ? 0 : -1; S.dirty = false;
+            S.canvasCrop = d.canvasCrop || null;
+            _cancelCropMode();
+            if (cropBtn) cropBtn.classList.toggle('ive-crop-active', !!S.canvasCrop);
             if ($('ive-project-name')) $('ive-project-name').value = S.projectName;
             _applyExportSettings(d.export_settings);
             _historyStack.length = 0; _historyIdx = -1; _historyMinIdx = 0;
             clearTimeout(_propsHistTimer); _propsHistTimer = null;
+            _updatePreviewSize();
             renderAll(); _pushHistory(); await loadProjectsList();
             toast('Проект открыт: ' + d.name, 'ok');
         } catch (e) { toast(e.message, 'err'); }
@@ -746,7 +996,7 @@ export async function init() {
             if (overlapY(audioTrackEl)) {
                 S.audioTracks.forEach((track, i) => {
                     const tStart = track.startOffset || 0;
-                    const tEnd = tStart + (track.duration !== undefined ? track.duration : Math.max(1, totalDur() - tStart));
+                    const tEnd = tStart + (track.duration !== undefined ? track.duration : (track.originalDuration || Math.max(1, _extTotal() - tStart)));
                     if (tEnd > t1 && tStart < t2) { S.selAudioIdxs.add(i); S.selAudioIdx = i; }
                 });
             }
@@ -794,7 +1044,7 @@ export async function init() {
             case 'ArrowLeft':   e.preventDefault(); _seek(S.currentTime - (e.shiftKey ? 1 : 0.1)); break;
             case 'ArrowRight':  e.preventDefault(); _seek(S.currentTime + (e.shiftKey ? 1 : 0.1)); break;
             case 'Home':        e.preventDefault(); _seek(0);                                  break;
-            case 'End':         e.preventDefault(); _seek(totalDur());                         break;
+            case 'End':         e.preventDefault(); _seek(_extTotal());                        break;
             case 'Delete': case 'Backspace': {
             const hasAnySelection = S.selIdx >= 0 || S.selIdxs.size > 0 ||
                 S.selSubIdx >= 0 || S.selSubIdxs.size > 0 ||
@@ -845,6 +1095,197 @@ export async function init() {
     await loadTemplatesList();
     renderAll();
 
+    // ── Track drag & drop reordering ──────────────────────────────────────────
+    (function _initTrackDrag() {
+        const TRACK_KEYS = ['video', 'audio', 'subtitle', 'pip'];
+        const TRACK_LABEL_IDS = {
+            video: 'ive-video-lbl', audio: 'ive-audio-lbl',
+            subtitle: 'ive-subs-lbl', pip: 'ive-pip-lbl',
+        };
+        // Add drag handle to each label
+        for (const key of TRACK_KEYS) {
+            const lbl = document.getElementById(TRACK_LABEL_IDS[key]);
+            if (!lbl) continue;
+            lbl.style.display = 'flex';
+            lbl.style.alignItems = 'center';
+            lbl.style.cursor = 'default';
+            const handle = document.createElement('span');
+            handle.title = 'Перетащить для изменения порядка';
+            handle.style.cssText = 'cursor:grab;padding:0 4px 0 0;opacity:0.5;font-size:14px;line-height:1;flex-shrink:0;user-select:none';
+            handle.textContent = '⋮⋮';
+            handle.dataset.trackDragKey = key;
+            lbl.insertBefore(handle, lbl.firstChild);
+        }
+
+        let _dragKey = null, _dragGhost = null, _dragOriginY = 0;
+
+        function _getOrderIdx(y) {
+            const lblEls = labelsScroll.querySelectorAll('[id$="-lbl"]');
+            let best = S.trackOrder.length;
+            for (let i = 0; i < lblEls.length; i++) {
+                const r = lblEls[i].getBoundingClientRect();
+                if (y < r.top + r.height / 2) { best = i; break; }
+            }
+            return best;
+        }
+
+        labelsScroll.addEventListener('mousedown', e => {
+            const handle = e.target.closest('[data-track-drag-key]');
+            if (!handle || e.button !== 0) return;
+            _dragKey = handle.dataset.trackDragKey;
+            _dragOriginY = e.clientY;
+            e.preventDefault();
+
+            _dragGhost = document.createElement('div');
+            _dragGhost.style.cssText = 'position:fixed;z-index:9999;background:var(--bg2,#222);border:1px solid var(--accent,#f97316);border-radius:4px;padding:4px 8px;font-size:11px;pointer-events:none;opacity:0.85;white-space:nowrap';
+            _dragGhost.textContent = handle.parentElement.textContent.replace('⋮⋮', '').trim();
+            document.body.appendChild(_dragGhost);
+
+            const onMove = ev => {
+                if (!_dragGhost) return;
+                _dragGhost.style.left = (ev.clientX + 12) + 'px';
+                _dragGhost.style.top  = (ev.clientY - 10) + 'px';
+            };
+            const onUp = ev => {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                if (_dragGhost) { _dragGhost.remove(); _dragGhost = null; }
+                if (!_dragKey) return;
+
+                const fromIdx = S.trackOrder.indexOf(_dragKey);
+                if (fromIdx === -1) { _dragKey = null; return; }
+
+                const toIdx = _getOrderIdx(ev.clientY);
+                const newOrder = [...S.trackOrder];
+                newOrder.splice(fromIdx, 1);
+                const insertAt = Math.min(toIdx > fromIdx ? toIdx - 1 : toIdx, newOrder.length);
+                newOrder.splice(insertAt, 0, _dragKey);
+                S.trackOrder = newOrder;
+                S.dirty = true;
+                _applyTrackOrder();
+                _dragKey = null;
+            };
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+    })();
+
+
+    // ── Add Track button (beautiful modal) ────────────────────────────────────
+    (function _initAddTrackBtn() {
+        const addTrackBtn = document.createElement('button');
+        addTrackBtn.className = 'ive-add-track-btn';
+        addTrackBtn.title = 'Добавить новую дорожку';
+        addTrackBtn.dataset.trackAddBtn = '1';
+        addTrackBtn.innerHTML = `<svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" style="flex-shrink:0"><path d="M8 2a.75.75 0 0 1 .75.75v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5a.75.75 0 0 1 0-1.5h4.5v-4.5A.75.75 0 0 1 8 2Z"/></svg> Дорожку`;
+        labelsScroll.appendChild(addTrackBtn);
+
+        const overlay = document.createElement('div');
+        overlay.id = 'ive-add-track-modal';
+        overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.65);display:none;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+        overlay.innerHTML = `
+          <div class="ive-atm-box">
+            <div class="ive-atm-hdr">
+              <h3 class="ive-atm-title">Добавить дорожку</h3>
+              <button id="ive-atm-close" class="ive-atm-close">&times;</button>
+            </div>
+            <div id="ive-atm-grid" class="ive-atm-grid"></div>
+          </div>
+        `;
+        document.body.appendChild(overlay);
+
+        const grid = overlay.querySelector('#ive-atm-grid');
+
+        // Track type definitions — "Add Track" creates an empty named track (lane/slot)
+        // "Add Element" (+) is per-label inside each track row
+        const GROUPS = [
+            {
+                key: 'clip', icon: '🎬', label: 'Clip',
+                desc: 'Дорожка для видео/изображений',
+                count: () => S.clips.length,
+                // Clip track is singular — just open the file picker to add elements
+                action: () => { _hide(); videoInput?.click(); },
+            },
+            {
+                key: 'audio', icon: '🎵', label: 'Audio',
+                desc: 'Новая аудиодорожка (новая полоса)',
+                count: () => {
+                    const lanes = new Set(S.audioTracks.map(t => t.laneIndex ?? 0));
+                    return lanes.size;
+                },
+                // Creates a new empty audio lane — user adds files with "+" in label
+                action: () => {
+                    _hide();
+                    const allLanes = new Set([
+                        ...S.audioTracks.map(t => t.laneIndex ?? 0),
+                        ...S.audioLanes,
+                    ]);
+                    const newLane = allLanes.size ? Math.max(...allLanes) + 1 : 0;
+                    if (!S.audioLanes.includes(newLane)) S.audioLanes.push(newLane);
+                    renderTimeline();
+                    toast('Аудиодорожка создана', 'info');
+                },
+            },
+            {
+                key: 'pip', icon: '📺', label: 'PIP',
+                desc: 'Новый PIP слой поверх видео',
+                count: () => S.pipLayers.filter(p => !p._empty).length,
+                // PIP track creates a new empty layer
+                action: () => {
+                    _hide();
+                    const emptyPip = _normalizePip({
+                        id: uid(), type: 'image', file: null, fileUrl: null, thumbUrl: null,
+                        x: 5, y: 5, w: 30, h: 20,
+                        startTime: 0, endTime: Math.max(totalDur(), 5),
+                        order: S.pipLayers.length,
+                        _empty: true,
+                    });
+                    S.pipLayers.push(emptyPip);
+                    S.dirty = true;
+                    renderTimeline(); renderPreview();
+                    toast('PIP дорожка создана', 'info');
+                },
+            },
+            {
+                key: 'subtitle', icon: '📝', label: 'Subtitle',
+                desc: 'Дорожка субтитров',
+                count: () => S.subtitles.length,
+                // Subtitle track creates a new subtitle entry
+                action: () => {
+                    _hide();
+                    const td = totalDur();
+                    S.subtitles.push({ id: uid(), text: 'Subtitle', start: S.currentTime, end: Math.min(S.currentTime + 3, td || 3), style: {} });
+                    S.dirty = true; renderAll();
+                    toast('Субтитр добавлен — нажмите + для добавления ещё', 'info');
+                },
+            },
+        ];
+
+        function _refreshGrid() {
+            grid.innerHTML = '';
+            GROUPS.forEach(g => {
+                const card = document.createElement('button');
+                card.className = 'ive-atm-card';
+                const cnt = g.count();
+                card.innerHTML = `
+                  <span class="ive-atm-card-icon">${g.icon}</span>
+                  <span class="ive-atm-card-label">${g.label}</span>
+                  <span class="ive-atm-card-items"><span>${g.desc}</span></span>
+                  ${cnt > 0 ? `<span class="ive-atm-card-count">${cnt}</span>` : ''}
+                `;
+                card.addEventListener('click', g.action);
+                grid.appendChild(card);
+            });
+        }
+
+        const _show = () => { _refreshGrid(); overlay.style.display = 'flex'; };
+        const _hide = () => { overlay.style.display = 'none'; };
+        addTrackBtn.addEventListener('click', _show);
+        overlay.querySelector('#ive-atm-close').addEventListener('click', _hide);
+        overlay.addEventListener('click', e => { if (e.target === overlay) _hide(); });
+        document.addEventListener('keydown', e => { if (e.key === 'Escape' && overlay.style.display !== 'none') _hide(); });
+    })();
+
     // ── Export Modal ──────────────────────────────────────────────────────────
     const expModal = createExpModal({
         summaryEl: expSummaryEl,
@@ -891,14 +1332,14 @@ export async function init() {
     // ══════════════════════════════════════════════════════════════════════════
 
     async function _uploadImages(files) {
-        const dur = parseFloat(globalDurEl.value) || 3;
+        const dur = parseFloat(globalDurEl.value) || 4;
         for (const file of files) {
             try {
                 const fd = new FormData(); fd.append('file', file);
                 const r = await fetch('/api/imgvid/images', { method: 'POST', body: fd });
                 const d = await r.json();
                 if (!r.ok) { toast(d.detail || 'Ошибка', 'err'); continue; }
-                S.clips.push({ id: uid(), type: 'image', file: d.name, fileUrl: d.url, thumbUrl: d.url, original: d.original, duration: dur, transition: { type: 'fade', duration: 0.5 }, startEffect: { type: 'none', duration: 1.0 }, endEffect: { type: 'none', duration: 1.0 }, effects: [], subtitles: [], imgScale: 100, imgOffsetX: 0, imgOffsetY: 0, crop: null });
+                S.clips.push({ id: uid(), type: 'image', file: d.name, fileUrl: d.url, thumbUrl: d.url, original: d.original, duration: dur, transition: { type: 'fade', duration: 0.5 }, startEffect: { type: 'none', duration: 1.0 }, endEffect: { type: 'none', duration: 1.0 }, continuousEffect: { type: 'none', intensity: 30 }, effects: [], subtitles: [], imgScale: 100, imgOffsetX: 0, imgOffsetY: 0, crop: null });
                 _pushHistory();
                 S.dirty = true; log('Изображение добавлено: ' + d.original, 'done');
             } catch (e) { toast(e.message, 'err'); }
@@ -915,7 +1356,7 @@ export async function init() {
                 const r = await fetch('/api/imgvid/clips', { method: 'POST', body: fd });
                 const d = await r.json();
                 if (!r.ok) { toast(d.detail || 'Ошибка', 'err'); continue; }
-                S.clips.push({ id: uid(), type: 'video', file: d.name, fileUrl: d.url, thumbUrl: d.thumb_url || '', original: d.original, duration: d.duration || 5, originalDuration: d.duration || 5, transition: { type: 'fade', duration: 0.5 }, startEffect: { type: 'none', duration: 1.0 }, endEffect: { type: 'none', duration: 1.0 }, effects: [], subtitles: [] });
+                S.clips.push({ id: uid(), type: 'video', file: d.name, fileUrl: d.url, thumbUrl: d.thumb_url || '', original: d.original, duration: d.duration || 5, originalDuration: d.duration || 5, transition: { type: 'fade', duration: 0.5 }, startEffect: { type: 'none', duration: 1.0 }, endEffect: { type: 'none', duration: 1.0 }, continuousEffect: { type: 'none', intensity: 30 }, effects: [], subtitles: [] });
                 _pushHistory();
                 S.dirty = true; log('Видеоклип добавлен: ' + d.original, 'done');
             } catch (e) { toast(e.message, 'err'); }
@@ -946,7 +1387,9 @@ export async function init() {
             const r = await fetch('/api/imgvid/audio', { method: 'POST', body: fd });
             const d = await r.json();
             if (!r.ok) { toast(d.detail || 'Ошибка', 'err'); return; }
-            const _newLane = _getNextLane();
+            const _newLane = (S._nextAudioLane !== undefined) ? S._nextAudioLane : _getNextLane();
+            delete S._nextAudioLane;
+            if (!S.audioLanes.includes(_newLane)) S.audioLanes.push(_newLane);
             const track = { id: uid(), file: d.name, fileUrl: d.url, original: d.original, volume: 1, fadeIn: 0, fadeOut: 0, startOffset: _findFreeAudioOffset(_newLane), trimIn: 0, laneIndex: _newLane };
             S.audioTracks.push(track);
             _pushHistory();
@@ -964,8 +1407,8 @@ export async function init() {
     function _togglePlay() { S.isPlaying ? _pausePlayback() : _startPlayback(); }
 
     function _startPlayback() {
-        if (!S.clips.length) return;
-        if (S.currentTime >= totalDur() - 0.05) _seek(0);
+        if (!S.clips.length && !S.audioTracks.length) return;
+        if (S.currentTime >= _extTotal() - 0.05) _seek(0);
         S.isPlaying = true;
         S._playStartReal    = performance.now();
         S._playStartProject = S.currentTime;
@@ -995,7 +1438,7 @@ export async function init() {
     function _tick(now) {
         if (!S.isPlaying) return;
         const elapsed = (now - S._playStartReal) / 1000;
-        const total   = totalDur();
+        const total   = _extTotal();
         S.currentTime = Math.min(S._playStartProject + elapsed, total);
         _updateTransportUI();
         renderPreview();
@@ -1008,7 +1451,7 @@ export async function init() {
     }
 
     function _seek(t) {
-        S.currentTime = Math.max(0, Math.min(totalDur(), t));
+        S.currentTime = Math.max(0, Math.min(_extTotal(), t));
         if (S.isPlaying) { S._playStartReal = performance.now(); S._playStartProject = S.currentTime; }
         _updateTransportUI();
         renderPreview();
@@ -1017,7 +1460,7 @@ export async function init() {
     }
 
     function _updateTransportUI() {
-        const total = totalDur();
+        const total = _extTotal();
         seekBar.value = total > 0 ? (S.currentTime / total) * 10000 : 0;
         curTime.textContent = fmt(S.currentTime);
         totTime.textContent = fmt(total);
@@ -1041,13 +1484,20 @@ export async function init() {
             zoomDisplay.textContent = '100%';
             zoomPct.style.display = 'none'; zoomSign.style.display = 'none';
             _updatePreviewSize();
+        } else if (mode === 'cover') {
+            S.previewZoom = 1;
+            previewContent.style.transform = '';
+            previewContent.style.transformOrigin = '';
+            zoomDisplay.textContent = 'Cover';
+            zoomPct.style.display = 'none'; zoomSign.style.display = 'none';
+            _updatePreviewSize();
         } else {
+            // internal custom scale (e.g., Ctrl+Scroll wheel)
             const scale = Math.max(0.1, Math.min(8, pct / 100));
             S.previewZoom = scale;
             previewContent.style.transform = `scale(${scale})`;
             zoomDisplay.textContent = Math.round(scale * 100) + '%';
             zoomPct.value = Math.round(scale * 100);
-            zoomPct.style.display = ''; zoomSign.style.display = '';
             _updatePreviewSize();
         }
     }
@@ -1063,18 +1513,46 @@ export async function init() {
         const parts  = resVal.split('x').map(Number);
         const resW   = parts[0] || 1920;
         const resH   = parts[1] || 1080;
+
+        const crop  = S.canvasCrop;
+        const cropSx = (crop && crop.resW) ? resW / crop.resW : 1;
+        const cropSy = (crop && crop.resH) ? resH / crop.resH : 1;
+        const viewW = (crop && crop.w > 0) ? Math.round(crop.w * cropSx) : resW;
+        const viewH = (crop && crop.h > 0) ? Math.round(crop.h * cropSy) : resH;
+
         let w, h;
         if (S.previewMode === 'original') {
-            w = resW; h = resH;
+            w = viewW; h = viewH;
         } else {
             const cW = previewInner.clientWidth  || 640;
             const cH = previewInner.clientHeight || 360;
-            const sc = Math.min(cW / resW, cH / resH);
-            w = Math.floor(resW * sc); h = Math.floor(resH * sc);
+            const sc = S.previewMode === 'cover'
+                ? Math.max(cW / viewW, cH / viewH)
+                : Math.min(cW / viewW, cH / viewH);
+            w = Math.floor(viewW * sc); h = Math.floor(viewH * sc);
         }
         previewContent.style.width  = w + 'px';
         previewContent.style.height = h + 'px';
         S.previewH = h; S.previewW = w;
+
+        // Canvas crop: offset the full-canvas media wrap within the crop viewport
+        if (crop && crop.w > 0 && crop.h > 0) {
+            const scale = w / viewW;
+            previewMediaWrap.style.left   = (-Math.round(crop.x * scale)) + 'px';
+            previewMediaWrap.style.top    = (-Math.round(crop.y * scale)) + 'px';
+            previewMediaWrap.style.right  = 'auto';
+            previewMediaWrap.style.bottom = 'auto';
+            previewMediaWrap.style.width  = Math.round(resW * scale) + 'px';
+            previewMediaWrap.style.height = Math.round(resH * scale) + 'px';
+        } else {
+            previewMediaWrap.style.left   = '';
+            previewMediaWrap.style.top    = '';
+            previewMediaWrap.style.right  = '';
+            previewMediaWrap.style.bottom = '';
+            previewMediaWrap.style.width  = '';
+            previewMediaWrap.style.height = '';
+        }
+
         if (previewContentNext) {
             const iW   = previewInner.clientWidth  || 640;
             const iH   = previewInner.clientHeight || 360;
@@ -1219,6 +1697,7 @@ export async function init() {
         previewContent.style.clipPath = '';
         if (zT) previewContent.style.transform = zT;
         else previewContent.style.transform = '';
+        if (previewMediaWrap) previewMediaWrap.style.transform = '';
         previewContentNext.style.display   = 'none';
         previewContentNext.style.opacity   = '1';
         previewContentNext.style.transform = '';
@@ -1278,17 +1757,48 @@ export async function init() {
         });
     }
 
+    // ── Track ordering ────────────────────────────────────────────────────────
+    function _applyTrackOrder() {
+        const _TRACK_META = {
+            video:    { labelId: 'ive-video-lbl',    trackId: 'ive-video-track'    },
+            audio:    { labelId: 'ive-audio-lbl',    trackId: 'ive-audio-track'    },
+            subtitle: { labelId: 'ive-subs-lbl',     trackId: 'ive-subtitle-track' },
+            pip:      { labelId: 'ive-pip-lbl',      trackId: 'ive-pip-track'      },
+        };
+        // Sentinel: keep "+Track" button at end if present
+        const addBtn = labelsScroll.querySelector('[data-track-add-btn]');
+        // Reorder label elements (insert before sentinel or append)
+        for (const key of S.trackOrder) {
+            const lbl = document.getElementById(_TRACK_META[key]?.labelId);
+            if (lbl && lbl.parentNode === labelsScroll) {
+                addBtn ? labelsScroll.insertBefore(lbl, addBtn) : labelsScroll.appendChild(lbl);
+            }
+        }
+        // Reorder track rows (insert before playhead in order)
+        for (const key of S.trackOrder) {
+            const trk = document.getElementById(_TRACK_META[key]?.trackId);
+            if (trk && trk.parentNode === tracksInner) tracksInner.insertBefore(trk, playheadEl);
+        }
+    }
+
     // ── Timeline ──────────────────────────────────────────────────────────────
     function renderTimeline() {
         const total = totalDur();
         totalDurEl.textContent = total.toFixed(1) + 'с';
-        const contentW = Math.max(total * S.pxPerSec, (tracksScroll.clientWidth || 500));
+        // Extend timeline to cover audio tracks that run beyond slides
+        const audioEnd = S.audioTracks.reduce((max, t) => {
+            const end = (t.startOffset || 0) + (t.duration !== undefined ? t.duration : (t.originalDuration || 0));
+            return Math.max(max, end);
+        }, 0);
+        const extTotal = Math.max(total, audioEnd);
+        const contentW = Math.max(extTotal * S.pxPerSec, (tracksScroll.clientWidth || 500));
         tracksInner.style.minWidth = contentW + 'px';
-        _renderRuler(contentW, total);
-        _renderVideoTrack(total);
-        _renderAudioTracks(total, contentW);
-        _renderSubsTrack(total);
-        _renderPipTrack(total);
+        _renderRuler(contentW, extTotal);
+        _renderVideoTrack(extTotal);
+        _renderAudioTracks(total, contentW, extTotal);
+        _renderSubsTrack(extTotal);
+        _renderPipTrack(extTotal);
+        _applyTrackOrder();
         renderPlayhead();
     }
 
@@ -1471,13 +1981,14 @@ export async function init() {
         });
     }
 
-    function _renderAudioTracks(total, contentW) {
+    function _renderAudioTracks(total, contentW, extTotal = total) {
         const rowH = 44;
 
         // Backward compat: give every track without a laneIndex its own unique lane
         S.audioTracks.forEach((t, i) => { if (t.laneIndex === undefined) t.laneIndex = i; });
 
         const lanesSet = new Set(S.audioTracks.map(t => t.laneIndex));
+        (S.audioLanes || []).forEach(l => lanesSet.add(l));
         const uniqueLanes = [...lanesSet].sort((a, b) => a - b);
         if (!uniqueLanes.length) uniqueLanes.push(0);
 
@@ -1485,13 +1996,20 @@ export async function init() {
         audioTrackEl.style.height = totalH + 'px';
         audioLblEl.style.height   = totalH + 'px';
         audioLblEl.style.display  = 'flex';
-        audioLblEl.style.flexDirection = 'column';
+        audioLblEl.style.flexDirection = 'row';
+        const _audioHandle = audioLblEl.querySelector('[data-track-drag-key]');
         audioLblEl.innerHTML = '';
 
         audioTrackEl.innerHTML = '';
 
-        if (!S.audioTracks.length) {
-            audioLblEl.innerHTML = `<div style="height:${rowH}px;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em">AUDIO</div>`;
+        if (!S.audioTracks.length && !S.audioLanes.length) {
+            const emptyLbl = document.createElement('div');
+            emptyLbl.style.cssText = `height:${rowH}px;display:flex;align-items:center;padding:0 4px;font-size:8px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em`;
+            if (_audioHandle) emptyLbl.appendChild(_audioHandle);
+            const _emptyTxt = document.createElement('span');
+            _emptyTxt.textContent = 'AUDIO';
+            emptyLbl.appendChild(_emptyTxt);
+            audioLblEl.appendChild(emptyLbl);
             const empty = document.createElement('div');
             empty.className = 'ive-audio-row-inner';
             empty.innerHTML = '<div class="ive-tl-empty-abs">Нет аудиодорожек</div>';
@@ -1502,8 +2020,11 @@ export async function init() {
         uniqueLanes.forEach((laneIdx, lj) => {
             // Label for this lane
             const lbl = document.createElement('div');
-            lbl.style.cssText = `height:${rowH}px;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid rgba(255,255,255,.04);flex-shrink:0`;
-            lbl.textContent = uniqueLanes.length === 1 ? 'AUDIO' : `AUDIO ${laneIdx + 1}`;
+            lbl.style.cssText = `height:${rowH}px;display:flex;align-items:center;padding:0 4px;font-size:8px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid rgba(255,255,255,.04);flex-shrink:0`;
+            if (lj === 0 && _audioHandle) lbl.appendChild(_audioHandle);
+            const lblTxt = document.createElement('span');
+            lblTxt.textContent = uniqueLanes.length === 1 ? 'AUDIO' : `AUDIO ${laneIdx + 1}`;
+            lbl.appendChild(lblTxt);
             audioLblEl.appendChild(lbl);
 
             // Row for this lane
@@ -1517,7 +2038,7 @@ export async function init() {
                 if ((track.laneIndex ?? 0) !== laneIdx) return;
 
                 const offsetPx = (track.startOffset || 0) * S.pxPerSec;
-                const trackDur = track.duration !== undefined ? track.duration : Math.max(1, total - (track.startOffset || 0));
+                const trackDur = track.duration !== undefined ? track.duration : (track.originalDuration || Math.max(1, extTotal - (track.startOffset || 0)));
                 const itemW    = trackDur * S.pxPerSec;
                 const item     = document.createElement('div');
                 const isMultiAudioSel = S.selAudioIdxs.size > 1 && S.selAudioIdxs.has(i);
@@ -1559,6 +2080,7 @@ export async function init() {
                     }
                     S.activeTab = 'slide'; renderTimeline(); renderProps();
                     const sx = e.clientX, sy = e.clientY;
+                    const scrollStart = tracksScroll.scrollLeft;
                     const _dragInitAudio = [...S.selAudioIdxs].map(idx => ({
                         idx,
                         startOffset: S.audioTracks[idx]?.startOffset || 0,
@@ -1577,7 +2099,8 @@ export async function init() {
                     const onMove = ev => {
                         if (!moved && Math.abs(ev.clientX - sx) < 4 && Math.abs(ev.clientY - sy) < 4) return;
                         moved = true;
-                        const dx = (ev.clientX - sx) / S.pxPerSec;
+                        const scrollDx = tracksScroll.scrollLeft - scrollStart;
+                        const dx = (ev.clientX - sx + scrollDx) / S.pxPerSec;
                         const laneShift = Math.round((ev.clientY - sy) / rowH);
                         _dragInitAudio.forEach(({ idx, startOffset, laneIndex: initLane }) => {
                             if (!S.audioTracks[idx]) return;
@@ -1598,6 +2121,9 @@ export async function init() {
                             p.startTime = newStart; p.endTime = Math.round((newStart + dur) * 10) / 10;
                         });
                         S.dirty = true; renderTimeline(); renderProps();
+                        const scR = tracksScroll.getBoundingClientRect();
+                        if (ev.clientX > scR.right - 50) tracksScroll.scrollLeft += 10;
+                        else if (ev.clientX < scR.left + 50) tracksScroll.scrollLeft = Math.max(0, tracksScroll.scrollLeft - 10);
                     };
                     const onUp = () => {
                         document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp);
@@ -1609,12 +2135,14 @@ export async function init() {
                 lh.addEventListener('mousedown', e => {
                     e.stopPropagation(); e.preventDefault();
                     const sx = e.clientX, sOff = track.startOffset || 0, sTrimIn = track.trimIn || 0;
-                    const sDur = track.duration !== undefined ? track.duration : Math.max(1, total - sOff);
+                    const scrollStart = tracksScroll.scrollLeft;
+                    const sDur = track.duration !== undefined ? track.duration : (track.originalDuration || Math.max(1, extTotal - sOff));
                     const outPt = sOff + sDur;
                     let moved = false;
                     const onMove = ev => {
                         moved = true;
-                        const dx = (ev.clientX - sx) / S.pxPerSec;
+                        const scrollDx = tracksScroll.scrollLeft - scrollStart;
+                        const dx = (ev.clientX - sx + scrollDx) / S.pxPerSec;
                         const maxTrimIn = (track.originalDuration || 9999) - 0.5;
                         const newOff    = Math.max(0, Math.round((sOff + dx) * 10) / 10);
                         const newTrimIn = Math.max(0, Math.min(maxTrimIn, Math.round((sTrimIn + dx) * 10) / 10));
@@ -1622,6 +2150,9 @@ export async function init() {
                         track.trimIn      = newTrimIn;
                         track.duration    = Math.max(0.5, Math.round((outPt - newOff) * 10) / 10);
                         S.dirty = true; renderTimeline(); if (i === S.selAudioIdx) renderProps();
+                        const scR = tracksScroll.getBoundingClientRect();
+                        if (ev.clientX > scR.right - 50) tracksScroll.scrollLeft += 10;
+                        else if (ev.clientX < scR.left + 50) tracksScroll.scrollLeft = Math.max(0, tracksScroll.scrollLeft - 10);
                     };
                     const onUp = () => {
                         document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp);
@@ -1633,13 +2164,18 @@ export async function init() {
                 rh.addEventListener('mousedown', e => {
                     e.stopPropagation(); e.preventDefault();
                     const sx = e.clientX;
-                    const sDur = track.duration !== undefined ? track.duration : Math.max(1, total - (track.startOffset || 0));
+                    const scrollStart = tracksScroll.scrollLeft;
+                    const sDur = track.duration !== undefined ? track.duration : (track.originalDuration || Math.max(1, extTotal - (track.startOffset || 0)));
                     let moved = false;
                     const onMove = ev => {
                         moved = true;
+                        const scrollDx = tracksScroll.scrollLeft - scrollStart;
                         const maxDur = (track.originalDuration || 9999) - (track.trimIn || 0);
-                        track.duration = Math.max(0.5, Math.min(maxDur, Math.round((sDur + (ev.clientX - sx) / S.pxPerSec) * 10) / 10));
+                        track.duration = Math.max(0.5, Math.min(maxDur, Math.round((sDur + (ev.clientX - sx + scrollDx) / S.pxPerSec) * 10) / 10));
                         S.dirty = true; renderTimeline(); if (i === S.selAudioIdx) renderProps();
+                        const scR = tracksScroll.getBoundingClientRect();
+                        if (ev.clientX > scR.right - 50) tracksScroll.scrollLeft += 10;
+                        else if (ev.clientX < scR.left + 50) tracksScroll.scrollLeft = Math.max(0, tracksScroll.scrollLeft - 10);
                     };
                     const onUp = () => {
                         document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp);
@@ -1651,6 +2187,15 @@ export async function init() {
                 row.appendChild(item);
                 drawWaveform(canvas, track.fileUrl, track.trimIn || 0, trackDur);
             });
+
+            if (!S.audioTracks.some(t => (t.laneIndex ?? 0) === laneIdx)) {
+                const ph = document.createElement('div');
+                ph.className = 'ive-tl-empty-abs';
+                ph.textContent = 'Нажмите для добавления аудио';
+                ph.style.cssText = 'cursor:pointer;font-size:9px;';
+                ph.addEventListener('click', () => { S._nextAudioLane = laneIdx; addAudioBtn?.click(); });
+                row.appendChild(ph);
+            }
 
             audioTrackEl.appendChild(row);
         });
@@ -1785,8 +2330,8 @@ export async function init() {
     }
 
     function renderPlayhead() {
-        const total = totalDur();
-        if (total <= 0 || !S.clips.length) { playheadEl.style.display = 'none'; return; }
+        const total = _extTotal();
+        if (total <= 0) { playheadEl.style.display = 'none'; return; }
         playheadEl.style.display = 'block';
         playheadEl.style.left    = (S.currentTime * S.pxPerSec) + 'px';
         if (S.isPlaying) {
@@ -1859,20 +2404,24 @@ export async function init() {
         // Show current clip
         if (clip.type === 'image') {
             previewVideo.style.display = 'none';
+            _applyFramePos(previewVideo, null);
             if (previewImg.dataset.src !== clip.fileUrl) {
                 previewImg.src = clip.fileUrl; previewImg.dataset.src = clip.fileUrl;
             }
             previewImg.style.display = 'block';
             _applyImgTransform(previewImg, clip);
+            _applyFramePos(previewImg, clip);
         } else {
             previewImg.style.display = 'none';
             previewImg.style.transform = '';
             previewImg.style.clipPath = '';
+            _applyFramePos(previewImg, null);
             if (previewVideo.dataset.src !== clip.fileUrl) {
                 previewVideo.src = clip.fileUrl; previewVideo.dataset.src = clip.fileUrl;
                 previewVideo.load();
             }
             previewVideo.style.display = 'block';
+            _applyFramePos(previewVideo, clip);
             const videoTime = local + (clip.trimIn || 0);
             const vSpeed    = clip.speed ?? 1;
             if (previewVideo.playbackRate !== vSpeed) previewVideo.playbackRate = vSpeed;
@@ -1954,50 +2503,157 @@ export async function init() {
         }
     }
 
-    function _applyClipStartEndEffects(clip, local) {
-        const start = clip.startEffect;
-        const end   = clip.endEffect;
-        const dur   = clip.duration || 3;
-        let opacity = 1, scale = 1, tx = 0, ty = 0;
+    function _applyFramePos(el, clip) {
+        const fx = clip ? (clip.frameX || 0) : 0;
+        const fy = clip ? (clip.frameY || 0) : 0;
+        const fw = clip ? (clip.frameW ?? 100) : 100;
+        const fh = clip ? (clip.frameH ?? 100) : 100;
+        if (fx === 0 && fy === 0 && fw === 100 && fh === 100) {
+            el.style.position = '';
+            el.style.left = '';
+            el.style.top = '';
+            el.style.width = '';
+            el.style.height = '';
+        } else {
+            el.style.position = 'absolute';
+            el.style.left   = fx + '%';
+            el.style.top    = fy + '%';
+            el.style.width  = fw + '%';
+            el.style.height = fh + '%';
+        }
+    }
 
+    function _applyClipStartEndEffects(clip, local) {
+        const start   = clip.startEffect;
+        const end     = clip.endEffect;
+        const cont    = clip.continuousEffect;
+        const dur     = clip.duration || 3;
+        const effSpd  = Math.max(0.01, clip.effectSpeed ?? 1);
+        let opacity = 1, scale = 1, tx = 0, ty = 0, rotate = 0, flipX = 1, extraBlur = 0;
+
+        // ── Start effect ──────────────────────────────────────────────────────
         if (start?.type && start.type !== 'none') {
-            const d = Math.max(0.01, start.duration || 1);
+            const d = Math.max(0.01, (start.duration || 1) / effSpd);
             const p = Math.max(0, Math.min(1, local / d));
             if (p < 1) {
                 switch (start.type) {
-                    case 'fade-in':    opacity *= p; break;
-                    case 'zoom-in':    scale = 0.5 + 0.5 * p; break;
-                    case 'zoom-out':   scale = 1.5 - 0.5 * p; break;
-                    case 'slide-left': tx = (p - 1) * 100; break;
-                    case 'slide-right':tx = (1 - p) * 100; break;
-                    case 'slide-up':   ty = (p - 1) * 100; break;
-                    case 'slide-down': ty = (1 - p) * 100; break;
+                    case 'fade-in':       opacity *= p; break;
+                    case 'zoom-in':       scale = 0.5 + 0.5 * p; break;
+                    case 'zoom-out':      scale = 1.5 - 0.5 * p; break;
+                    case 'slide-left':    tx = (p - 1) * 100; break;
+                    case 'slide-right':   tx = (1 - p) * 100; break;
+                    case 'slide-up':      ty = (p - 1) * 100; break;
+                    case 'slide-down':    ty = (1 - p) * 100; break;
+                    case 'blur-in':       extraBlur = (1 - p) * 20; break;
+                    case 'rotate-in':     rotate = (1 - p) * -90; opacity = Math.min(1, p * 2); break;
+                    case 'flip-h-in':     flipX = p; opacity = Math.min(1, p * 3); break;
+                    case 'reveal-center': scale = Math.max(0.01, p); opacity = p < 0.15 ? p / 0.15 : 1; break;
+                    case 'bounce-in': {
+                        if (p < 0.6) { scale = p / 0.6; }
+                        else { const ep = (p - 0.6) / 0.4; scale = 1 + 0.25 * Math.sin(ep * Math.PI * 2.5) * (1 - ep); }
+                        opacity = Math.min(1, p * 2.5);
+                        break;
+                    }
                 }
             }
         }
 
+        // ── End effect ────────────────────────────────────────────────────────
         if (end?.type && end.type !== 'none') {
-            const d = Math.max(0.01, end.duration || 1);
+            const d = Math.max(0.01, (end.duration || 1) / effSpd);
             const p = Math.max(0, Math.min(1, (dur - local) / d));
             if (p < 1) {
                 switch (end.type) {
-                    case 'fade-out':   opacity *= p; break;
-                    case 'zoom-in':    scale *= 1 + (1 - p) * 0.5; break;
-                    case 'zoom-out':   scale *= 0.5 + 0.5 * p; break;
-                    case 'slide-left': tx -= (1 - p) * 100; break;
-                    case 'slide-right':tx += (1 - p) * 100; break;
-                    case 'slide-up':   ty -= (1 - p) * 100; break;
-                    case 'slide-down': ty += (1 - p) * 100; break;
+                    case 'fade-out':    opacity *= p; break;
+                    case 'zoom-in':     scale *= 1 + (1 - p) * 0.5; break;
+                    case 'zoom-out':    scale *= 0.5 + 0.5 * p; break;
+                    case 'slide-left':  tx -= (1 - p) * 100; break;
+                    case 'slide-right': tx += (1 - p) * 100; break;
+                    case 'slide-up':    ty -= (1 - p) * 100; break;
+                    case 'slide-down':  ty += (1 - p) * 100; break;
+                    case 'blur-out':    extraBlur += (1 - p) * 20; break;
+                    case 'rotate-out':  rotate += (1 - p) * 90; opacity *= Math.min(1, p * 2); break;
+                    case 'flip-h-out':  flipX *= p; opacity *= Math.min(1, p * 3); break;
+                    case 'hide-center': scale *= Math.max(0.01, p); opacity = p < 0.15 ? p / 0.15 : 1; break;
+                    case 'bounce-out': {
+                        if (p > 0.4) { scale *= p; }
+                        else { const ep = p / 0.4; scale *= 0.7 + 0.3 * (ep + (1 - ep) * Math.abs(Math.sin(ep * Math.PI * 2))); }
+                        opacity *= Math.min(1, p * 2.5);
+                        break;
+                    }
                 }
             }
         }
 
-        const zT  = S.previewMode === 'custom' ? `scale(${S.previewZoom})` : '';
-        const effT = (scale !== 1 || tx !== 0 || ty !== 0)
-            ? `scale(${scale.toFixed(4)}) translate(${tx.toFixed(2)}%, ${ty.toFixed(2)}%)`
-            : '';
-        previewContent.style.opacity   = opacity.toFixed(4);
-        previewContent.style.transform = [zT, effT].filter(Boolean).join(' ') || '';
+        // ── Continuous animation ──────────────────────────────────────────────
+        if (cont?.type && cont.type !== 'none') {
+            const intens = Math.max(0.01, Math.min(1, (cont.intensity ?? 30) / 100));
+            const t    = local;
+            const tSpd = local * effSpd;  // speed-scaled time for periodic effects
+            switch (cont.type) {
+                case 'ken-burns-in': {
+                    const prog = dur > 0 ? t / dur : 0;
+                    scale *= 1 + intens * 0.5 * prog;
+                    break;
+                }
+                case 'ken-burns-out': {
+                    const prog = dur > 0 ? t / dur : 0;
+                    scale *= 1 + intens * 0.5 * (1 - prog);
+                    break;
+                }
+                case 'ken-burns-lr': {
+                    const prog = dur > 0 ? t / dur : 0;
+                    scale *= 1 + intens * 0.15;
+                    tx += (prog - 0.5) * intens * 25;
+                    break;
+                }
+                case 'ken-burns-rl': {
+                    const prog = dur > 0 ? t / dur : 0;
+                    scale *= 1 + intens * 0.15;
+                    tx += (0.5 - prog) * intens * 25;
+                    break;
+                }
+                case 'pulse': {
+                    scale *= 1 + intens * 0.08 * Math.sin(2 * Math.PI * tSpd / 2.5);
+                    break;
+                }
+                case 'shake': {
+                    tx += intens * 3 * Math.sin(2 * Math.PI * tSpd / 0.9);
+                    break;
+                }
+                case 'float': {
+                    ty += intens * 2.5 * Math.sin(2 * Math.PI * tSpd / 3.5);
+                    break;
+                }
+                case 'zoom-breathe': {
+                    // Smooth breath: 100% at t=0 → 100%+amp at t=2s → 100% at t=4s, always ≥ 100%
+                    scale *= 1 + (intens / 6.0) * (0.5 + 0.5 * Math.sin(2 * Math.PI * tSpd / 4.0 - Math.PI / 2));
+                    break;
+                }
+                case 'rotate-slow': {
+                    rotate += (tSpd * intens * 30) % 360;
+                    break;
+                }
+            }
+        }
+
+        // ── Apply ─────────────────────────────────────────────────────────────
+        // Effect transforms go on the media wrapper inside previewContent so that
+        // previewContent's overflow:hidden clips any translate that goes out of frame.
+        const effectParts = [];
+        if (scale !== 1) effectParts.push(`scale(${scale.toFixed(4)})`);
+        if (flipX !== 1) effectParts.push(`scaleX(${flipX.toFixed(4)})`);
+        if (rotate !== 0) effectParts.push(`rotate(${rotate.toFixed(2)}deg)`);
+        if (tx !== 0 || ty !== 0) effectParts.push(`translate(${tx.toFixed(2)}%, ${ty.toFixed(2)}%)`);
+        if (previewMediaWrap) previewMediaWrap.style.transform = effectParts.join(' ') || '';
+
+        previewContent.style.opacity = opacity.toFixed(4);
+
+        if (extraBlur > 0) {
+            const cur = previewContent.style.filter || '';
+            const blurStr = `blur(${extraBlur.toFixed(1)}px)`;
+            previewContent.style.filter = cur ? `${blurStr} ${cur}` : blurStr;
+        }
     }
 
     function _renderSubOverlay(sub, subKey) {
@@ -2146,7 +2802,12 @@ export async function init() {
             const track = S.audioTracks[S.selAudioIdx];
             const st = track.startOffset || 0;
             const origDur = track.originalDuration || 3600;
-            const usedDur = track.duration !== undefined ? track.duration : Math.max(1, totalDur() - st);
+            const _audioEnd = S.audioTracks.reduce((m, trk) => {
+                const e = (trk.startOffset || 0) + (trk.duration !== undefined ? trk.duration : (trk.originalDuration || 0));
+                return Math.max(m, e);
+            }, 0);
+            const _extTot = Math.max(totalDur(), _audioEnd);
+            const usedDur = track.duration !== undefined ? track.duration : (track.originalDuration || Math.max(1, _extTot - st));
             const end = st + usedDur;
             if (t <= st + 0.05 || t >= end - 0.05) {
                 toast('Поставьте курсор внутри аудиодорожки', 'warn'); return;
@@ -2459,8 +3120,14 @@ export async function init() {
                 <label class="ive-label">Fade In (с)<input class="ive-input" id="acp-fi" type="number" min="0" max="30" step="0.5" value="${track.fadeIn || 0}"></label>
                 <label class="ive-label">Fade Out (с)<input class="ive-input" id="acp-fo" type="number" min="0" max="30" step="0.5" value="${track.fadeOut || 0}"></label>
             </div>
-            <label class="ive-label">Начало (с)<input class="ive-input" id="acp-offset" type="number" min="0" step="0.5" value="${track.startOffset || 0}"></label>
-            <label class="ive-label">Длит. (с)<input class="ive-input" id="acp-dur" type="number" min="0" step="0.5" placeholder="авто" value="${track.duration !== undefined ? track.duration : ''}"></label>
+            <label class="ive-label">Начало на таймлайне (с)<input class="ive-input" id="acp-offset" type="number" min="0" step="0.5" value="${track.startOffset || 0}"></label>
+            <div style="border:1px solid var(--border);border-radius:5px;padding:6px 8px;margin-bottom:4px">
+                <div style="font-size:10px;font-weight:600;color:var(--text-dim);margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em">Обрезка аудиофайла${track.originalDuration ? ` <span style="font-weight:400;text-transform:none">(файл: ${track.originalDuration.toFixed(1)} с)</span>` : ''}</div>
+                <div class="ive-row2">
+                    <label class="ive-label">Откуда (с)<input class="ive-input" id="acp-trimin" type="number" min="0" ${track.originalDuration ? `max="${(track.originalDuration - 0.5).toFixed(1)}"` : ''} step="0.1" value="${(track.trimIn || 0).toFixed(1)}"></label>
+                    <label class="ive-label">Докуда (с)<input class="ive-input" id="acp-trimout" type="number" min="0.5" ${track.originalDuration ? `max="${track.originalDuration.toFixed(1)}"` : ''} step="0.1" value="${((track.trimIn || 0) + (track.duration !== undefined ? track.duration : (track.originalDuration || 0))).toFixed(1)}"></label>
+                </div>
+            </div>
             <label class="ive-label">Дорожка
                 <select class="ive-select" id="acp-lane">
                     ${_uniqueLanes.map(l => `<option value="${l}"${l===curLane?' selected':''}>Дорожка ${l + 1}</option>`).join('')}
@@ -2491,9 +3158,35 @@ export async function init() {
         $('acp-fi').addEventListener('change', e => { track.fadeIn = parseFloat(e.target.value) || 0; S.dirty = true; });
         $('acp-fo').addEventListener('change', e => { track.fadeOut = parseFloat(e.target.value) || 0; S.dirty = true; });
         $('acp-offset').addEventListener('change', e => { track.startOffset = parseFloat(e.target.value) || 0; S.dirty = true; renderTimeline(); });
-        $('acp-dur').addEventListener('change', e => {
+
+        const _syncTrimFields = () => {
+            const tiEl = $('acp-trimin'), toEl = $('acp-trimout');
+            if (tiEl) tiEl.value = (track.trimIn || 0).toFixed(1);
+            if (toEl) toEl.value = ((track.trimIn || 0) + (track.duration !== undefined ? track.duration : (track.originalDuration || 0))).toFixed(1);
+        };
+
+        $('acp-trimin').addEventListener('change', e => {
             const v = parseFloat(e.target.value);
-            track.duration = isFinite(v) && v > 0 ? v : undefined;
+            if (!isFinite(v) || v < 0) return;
+            const origMax = track.originalDuration || 9999;
+            const newTrimIn = Math.max(0, Math.min(origMax - 0.5, v));
+            const prevEnd = (track.trimIn || 0) + (track.duration !== undefined ? track.duration : 0);
+            track.trimIn = Math.round(newTrimIn * 10) / 10;
+            if (prevEnd > track.trimIn) {
+                track.duration = Math.max(0.5, Math.round((prevEnd - track.trimIn) * 10) / 10);
+            }
+            _syncTrimFields();
+            S.dirty = true; renderTimeline();
+        });
+
+        $('acp-trimout').addEventListener('change', e => {
+            const v = parseFloat(e.target.value);
+            if (!isFinite(v)) return;
+            const origMax = track.originalDuration || 9999;
+            const trimIn = track.trimIn || 0;
+            const newEnd = Math.max(trimIn + 0.5, Math.min(origMax, v));
+            track.duration = Math.max(0.5, Math.round((newEnd - trimIn) * 10) / 10);
+            _syncTrimFields();
             S.dirty = true; renderTimeline();
         });
 
@@ -2515,8 +3208,7 @@ export async function init() {
             if (speedDisp) speedDisp.textContent = clamped + '×';
             if (track.originalDuration !== undefined) {
                 track.duration = track.originalDuration / clamped;
-                const durEl = $('acp-dur');
-                if (durEl) durEl.value = track.duration.toFixed(2);
+                _syncTrimFields();
             }
             S.dirty = true;
             const el = _audioEls.get(track.id);
@@ -2623,10 +3315,30 @@ export async function init() {
             <label class="ive-label" id="pv-end-eff-dur-row" ${(!clip.endEffect?.type||clip.endEffect.type==='none')?'hidden':''}>Длит. (с)
                 <input class="ive-input" id="pv-end-eff-dur" type="number" min="0.1" max="${clip.duration}" step="0.1" value="${clip.endEffect?.duration||1.0}">
             </label>
+            <div style="font-size:11px;font-weight:600;color:var(--text-dim);margin:6px 0 2px">Непрерывная анимация</div>
+            <label class="ive-label">Тип
+                <select class="ive-select" id="pv-cont-eff-type">
+                    ${CONTINUOUS_EFFECTS.map(e => `<option value="${e.value}"${(clip.continuousEffect?.type||'none')===e.value?' selected':''}>${e.label}</option>`).join('')}
+                </select>
+            </label>
+            <label class="ive-label" id="pv-cont-eff-int-row" ${(!clip.continuousEffect?.type||clip.continuousEffect.type==='none')?'hidden':''}>Интенсивность
+                <div class="ive-range-row">
+                    <input class="ive-range" type="range" id="pv-cont-eff-int" min="5" max="100" step="5" value="${clip.continuousEffect?.intensity??30}">
+                    <span class="ive-range-val" id="pv-cont-eff-int-v">${clip.continuousEffect?.intensity??30}</span>
+                </div>
+            </label>
+            <label class="ive-toggle-row ive-label">☑ Применить к Clip + PIP
+                <input class="ive-toggle" type="checkbox" id="pv-apply-pip-eff"${clip.applyEffectsToPip ? ' checked' : ''}>
+            </label>
+            <label class="ive-label">Скорость эффектов
+                <select class="ive-select" id="pv-eff-speed">
+                    ${[0.25,0.5,1,2,4,8,16,32].map(v=>`<option value="${v}"${(clip.effectSpeed??1)==v?' selected':''}>${v===1?'1× (норма)':v+'×'}</option>`).join('')}
+                </select>
+            </label>
             <label class="ive-label">Скорость
                 <div class="ive-range-row">
-                    <input class="ive-range" type="range" id="pv-speed-range" min="0.1" max="4" step="0.05" value="${Math.min(4, clip.speed??1)}">
-                    <input class="ive-input" id="pv-speed-input" type="number" min="0.1" max="10" step="0.05" style="width:60px;flex-shrink:0" value="${clip.speed??1}">
+                    <input class="ive-range" type="range" id="pv-speed-range" min="0.1" max="32" step="0.05" value="${Math.min(32, clip.speed??1)}">
+                    <input class="ive-input" id="pv-speed-input" type="number" min="0.1" max="32" step="0.05" style="width:60px;flex-shrink:0" value="${clip.speed??1}">
                 </div>
                 <div id="pv-speed-display" style="font-size:11px;color:var(--text-dim)">${(clip.speed??1)}×</div>
             </label>
@@ -2671,27 +3383,64 @@ export async function init() {
             const v = parseFloat(e.target.value);
             if (isFinite(v) && v > 0) { clip.transition.duration = v; S.dirty = true; }
         });
+        const _syncEffToPip = () => {
+            if (!clip.applyEffectsToPip || !S.pipLayers.length) return;
+            const se = JSON.parse(JSON.stringify(clip.startEffect || {}));
+            const ee = JSON.parse(JSON.stringify(clip.endEffect   || {}));
+            const ce = JSON.parse(JSON.stringify(clip.continuousEffect || {}));
+            S.pipLayers.forEach(p => { p.startEffect = se; p.endEffect = ee; p.continuousEffect = ce; });
+        };
         const seTypeEl = $('pv-start-eff-type'), seDurRow = $('pv-start-eff-dur-row');
         seTypeEl.addEventListener('change', () => {
             clip.startEffect = clip.startEffect || {};
             clip.startEffect.type = seTypeEl.value;
             seDurRow.hidden = seTypeEl.value === 'none';
-            S.dirty = true; renderPreview();
+            _syncEffToPip(); S.dirty = true; renderPreview();
         });
         $('pv-start-eff-dur')?.addEventListener('change', e => {
             const v = parseFloat(e.target.value);
-            if (isFinite(v) && v > 0) { (clip.startEffect = clip.startEffect || {}).duration = v; S.dirty = true; renderPreview(); }
+            if (isFinite(v) && v > 0) { (clip.startEffect = clip.startEffect || {}).duration = v; _syncEffToPip(); S.dirty = true; renderPreview(); }
         });
         const eeTypeEl = $('pv-end-eff-type'), eeDurRow = $('pv-end-eff-dur-row');
         eeTypeEl.addEventListener('change', () => {
             clip.endEffect = clip.endEffect || {};
             clip.endEffect.type = eeTypeEl.value;
             eeDurRow.hidden = eeTypeEl.value === 'none';
-            S.dirty = true; renderPreview();
+            _syncEffToPip(); S.dirty = true; renderPreview();
         });
         $('pv-end-eff-dur')?.addEventListener('change', e => {
             const v = parseFloat(e.target.value);
-            if (isFinite(v) && v > 0) { (clip.endEffect = clip.endEffect || {}).duration = v; S.dirty = true; renderPreview(); }
+            if (isFinite(v) && v > 0) { (clip.endEffect = clip.endEffect || {}).duration = v; _syncEffToPip(); S.dirty = true; renderPreview(); }
+        });
+        const ceTypeEl = $('pv-cont-eff-type'), ceIntRow = $('pv-cont-eff-int-row');
+        ceTypeEl.addEventListener('change', () => {
+            clip.continuousEffect = clip.continuousEffect || {};
+            clip.continuousEffect.type = ceTypeEl.value;
+            ceIntRow.hidden = ceTypeEl.value === 'none';
+            _syncEffToPip(); S.dirty = true; renderPreview();
+        });
+        $('pv-cont-eff-int')?.addEventListener('input', e => {
+            const v = parseInt(e.target.value);
+            (clip.continuousEffect = clip.continuousEffect || {}).intensity = v;
+            const vEl = $('pv-cont-eff-int-v');
+            if (vEl) vEl.textContent = v;
+            _syncEffToPip(); S.dirty = true; renderPreview();
+        });
+        $('pv-eff-speed')?.addEventListener('change', e => {
+            clip.effectSpeed = parseFloat(e.target.value) || 1;
+            S.dirty = true; renderPreview();
+        });
+        $('pv-apply-pip-eff')?.addEventListener('change', e => {
+            clip.applyEffectsToPip = e.target.checked;
+            if (e.target.checked && S.pipLayers.length > 0) {
+                const se = JSON.parse(JSON.stringify(clip.startEffect || { type: 'none', duration: 1 }));
+                const ee = JSON.parse(JSON.stringify(clip.endEffect   || { type: 'none', duration: 1 }));
+                const ce = JSON.parse(JSON.stringify(clip.continuousEffect || { type: 'none', intensity: 30 }));
+                S.pipLayers.forEach(p => { p.startEffect = se; p.endEffect = ee; p.continuousEffect = ce; });
+                renderPreview();
+                toast('Эффекты применены к PIP', 'ok');
+            }
+            S.dirty = true;
         });
         if (!isVideo) {
             $('pv-replace-btn').addEventListener('click', () => $('pv-replace-file').click());
@@ -2728,9 +3477,9 @@ export async function init() {
             });
         }
         const _applyVideoSpeed = (val) => {
-            const clamped = Math.max(0.1, Math.min(10, val));
+            const clamped = Math.max(0.1, Math.min(32, val));
             clip.speed = clamped;
-            $('pv-speed-range').value = Math.min(4, clamped);
+            $('pv-speed-range').value = Math.min(32, clamped);
             $('pv-speed-input').value = clamped;
             const dispEl = $('pv-speed-display');
             if (dispEl) dispEl.textContent = clamped + '×';
@@ -2759,10 +3508,11 @@ export async function init() {
         $('pv-apply-all').addEventListener('click', () => {
             S.clips.forEach((c, idx) => {
                 if (c === clip) return;
-                c.duration    = clip.duration;
-                c.transition  = JSON.parse(JSON.stringify(clip.transition  || {}));
-                c.startEffect = JSON.parse(JSON.stringify(clip.startEffect || {}));
-                c.endEffect   = JSON.parse(JSON.stringify(clip.endEffect   || {}));
+                c.duration         = clip.duration;
+                c.transition       = JSON.parse(JSON.stringify(clip.transition       || {}));
+                c.startEffect      = JSON.parse(JSON.stringify(clip.startEffect      || {}));
+                c.endEffect        = JSON.parse(JSON.stringify(clip.endEffect        || {}));
+                c.continuousEffect = JSON.parse(JSON.stringify(clip.continuousEffect || {}));
                 c.speed      = clip.speed;
                 c.muteAudio  = clip.muteAudio;
                 c.trimIn     = clip.trimIn;
@@ -3028,6 +3778,105 @@ export async function init() {
         return el;
     }
 
+    function _normalizePip(pip) {
+        pip.effects = pip.effects || [];
+        pip.startEffect = pip.startEffect || { type: 'none', duration: 0.5 };
+        pip.endEffect = pip.endEffect || { type: 'none', duration: 0.5 };
+        pip.continuousEffect = pip.continuousEffect || { type: 'none', intensity: 30 };
+        if (pip.order === undefined) pip.order = 0;
+        if (pip.effectSpeed === undefined) pip.effectSpeed = 1;
+        return pip;
+    }
+
+    function _applyPipEffects(pip, el, localTime) {
+        if (!el) return;
+        const { wrapper } = el;
+        const dur    = Math.max(0.001, (pip.endTime ?? ((pip.startTime||0) + 5)) - (pip.startTime||0));
+        const local  = Math.max(0, Math.min(dur, localTime));
+        const start  = pip.startEffect || {};
+        const end    = pip.endEffect   || {};
+        const cont   = pip.continuousEffect || {};
+        const effSpd = Math.max(0.01, pip.effectSpeed ?? 1);
+
+        let opacity = 1, scale = 1, tx = 0, ty = 0, rotate = 0, flipX = 1, extraBlur = 0;
+
+        if (start.type && start.type !== 'none') {
+            const d = Math.max(0.01, (start.duration || 0.5) / effSpd);
+            const p = Math.max(0, Math.min(1, local / d));
+            if (p < 1) {
+                switch (start.type) {
+                    case 'fade-in':       opacity *= p; break;
+                    case 'zoom-in':       scale = 0.5 + 0.5 * p; break;
+                    case 'zoom-out':      scale = 1.5 - 0.5 * p; break;
+                    case 'slide-left':    tx = (p - 1) * 100; break;
+                    case 'slide-right':   tx = (1 - p) * 100; break;
+                    case 'slide-up':      ty = (p - 1) * 100; break;
+                    case 'slide-down':    ty = (1 - p) * 100; break;
+                    case 'blur-in':       extraBlur = (1 - p) * 20; break;
+                    case 'rotate-in':     rotate = (1 - p) * -90; opacity = Math.min(1, p * 2); break;
+                    case 'flip-h-in':     flipX = p; opacity = Math.min(1, p * 3); break;
+                    case 'reveal-center': scale = Math.max(0.01, p); opacity = p < 0.15 ? p / 0.15 : 1; break;
+                    case 'bounce-in': {
+                        if (p < 0.6) { scale = p / 0.6; }
+                        else { const ep = (p - 0.6) / 0.4; scale = 1 + 0.25 * Math.sin(ep * Math.PI * 2.5) * (1 - ep); }
+                        opacity = Math.min(1, p * 2.5); break;
+                    }
+                }
+            }
+        }
+        if (end.type && end.type !== 'none') {
+            const d = Math.max(0.01, (end.duration || 0.5) / effSpd);
+            const p = Math.max(0, Math.min(1, (dur - local) / d));
+            if (p < 1) {
+                switch (end.type) {
+                    case 'fade-out':    opacity *= p; break;
+                    case 'zoom-in':     scale *= 1 + (1 - p) * 0.5; break;
+                    case 'zoom-out':    scale *= 0.5 + 0.5 * p; break;
+                    case 'slide-left':  tx -= (1 - p) * 100; break;
+                    case 'slide-right': tx += (1 - p) * 100; break;
+                    case 'slide-up':    ty -= (1 - p) * 100; break;
+                    case 'slide-down':  ty += (1 - p) * 100; break;
+                    case 'blur-out':    extraBlur += (1 - p) * 20; break;
+                    case 'rotate-out':  rotate += (1 - p) * 90; opacity *= Math.min(1, p * 2); break;
+                    case 'flip-h-out':  flipX *= p; opacity *= Math.min(1, p * 3); break;
+                    case 'hide-center': scale *= Math.max(0.01, p); opacity = p < 0.15 ? p / 0.15 : 1; break;
+                    case 'bounce-out': {
+                        if (p > 0.4) { scale *= p; }
+                        else { const ep = p / 0.4; scale *= 0.7 + 0.3 * (ep + (1 - ep) * Math.abs(Math.sin(ep * Math.PI * 2))); }
+                        opacity *= Math.min(1, p * 2.5); break;
+                    }
+                }
+            }
+        }
+        if (cont.type && cont.type !== 'none') {
+            const intens = Math.max(0.01, Math.min(1, (cont.intensity ?? 30) / 100));
+            const t    = local;
+            const tSpd = local * effSpd;
+            switch (cont.type) {
+                case 'ken-burns-in':  { const prog = dur > 0 ? t/dur : 0; scale *= 1 + intens * 0.5 * prog; break; }
+                case 'ken-burns-out': { const prog = dur > 0 ? t/dur : 0; scale *= 1 + intens * 0.5 * (1 - prog); break; }
+                case 'ken-burns-lr':  { const prog = dur > 0 ? t/dur : 0; scale *= 1 + intens * 0.15; tx += (prog - 0.5) * intens * 25; break; }
+                case 'ken-burns-rl':  { const prog = dur > 0 ? t/dur : 0; scale *= 1 + intens * 0.15; tx += (0.5 - prog) * intens * 25; break; }
+                case 'pulse':        scale *= 1 + intens * 0.08 * Math.sin(2 * Math.PI * tSpd / 2.5); break;
+                case 'shake':        tx += intens * 3 * Math.sin(2 * Math.PI * tSpd / 0.9); break;
+                case 'float':        ty += intens * 2.5 * Math.sin(2 * Math.PI * tSpd / 3.5); break;
+                case 'zoom-breathe': scale *= 1 + (intens / 6.0) * (0.5 + 0.5 * Math.sin(2 * Math.PI * tSpd / 4.0 - Math.PI / 2)); break;
+                case 'rotate-slow':  rotate += (tSpd * intens * 30) % 360; break;
+            }
+        }
+
+        wrapper.style.opacity = ((pip.opacity ?? 1) * opacity).toFixed(4);
+        const parts = [];
+        if (scale !== 1)         parts.push(`scale(${scale.toFixed(4)})`);
+        if (flipX !== 1)         parts.push(`scaleX(${flipX.toFixed(4)})`);
+        if (rotate !== 0)        parts.push(`rotate(${rotate.toFixed(2)}deg)`);
+        if (tx !== 0 || ty !== 0) parts.push(`translate(${tx.toFixed(2)}%, ${ty.toFixed(2)}%)`);
+        wrapper.style.transform = parts.join(' ') || '';
+        let filterStr = buildCSSFilter(pip.effects || []);
+        if (extraBlur > 0) filterStr = `blur(${extraBlur.toFixed(1)}px) ${filterStr}`.trim();
+        wrapper.style.filter = filterStr;
+    }
+
     function _positionPipEl(pip, el) {
         if (!el) return;
         const { wrapper } = el;
@@ -3037,6 +3886,7 @@ export async function init() {
         wrapper.style.height  = (pip.h || 20) + '%';
         wrapper.style.opacity = pip.opacity ?? 1;
         wrapper.style.filter  = buildCSSFilter(pip.effects || []);
+        wrapper.style.transform = '';
         const isSelected = S.selPipIdx >= 0 && S.pipLayers[S.selPipIdx] === pip;
         wrapper.classList.toggle('selected', isSelected);
     }
@@ -3161,13 +4011,16 @@ export async function init() {
 
     function _renderPipInPreview(currentTime) {
         const activeIds = new Set();
-        for (const pip of S.pipLayers) {
+        const sortedPip = [...S.pipLayers].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+        for (const pip of sortedPip) {
             const start = pip.startTime || 0;
+            if (pip._empty) continue;
             const end   = pip.endTime ?? (start + 5);
             if (currentTime < start || currentTime >= end) continue;
             activeIds.add(pip.id);
             const el = _getPipEl(pip);
             _positionPipEl(pip, el);
+            _applyPipEffects(pip, el, currentTime - start);
             if (pip.type === 'image') {
                 el.video.style.display = 'none';
                 if (el.img.src !== pip.fileUrl) { el.img.src = pip.fileUrl; }
@@ -3205,26 +4058,155 @@ export async function init() {
     function _renderPipTrack(total) {
         if (!pipTrackEl) return;
         const contentW = Math.max(total * S.pxPerSec, (tracksScroll.clientWidth || 500));
-        pipTrackEl.style.width = contentW + 'px';
+        const ROW_H = 32;
+
         pipTrackEl.innerHTML = '';
-        if (!S.pipLayers.length) {
-            pipTrackEl.innerHTML = '<div class="ive-tl-empty-abs" style="font-size:10px;opacity:.4">Нет PIP</div>';
+        const _pipHandle = pipLblEl ? pipLblEl.querySelector('[data-track-drag-key]') : null;
+        if (pipLblEl) {
+            pipLblEl.innerHTML = '';
+            pipLblEl.style.cssText = 'display:flex;flex-direction:row;';
+        }
+
+        // Each PIP gets its own row; highest order = first row (renders on top in export)
+        const sorted = [...S.pipLayers.entries()].sort(([, a], [, b]) => (b.order ?? 0) - (a.order ?? 0));
+
+        if (!sorted.length) {
+            const emptyH = ROW_H + 'px';
+            pipTrackEl.style.height = emptyH;
+            pipTrackEl.innerHTML = '<div class="ive-tl-empty-abs" style="font-size:10px;opacity:.4;cursor:pointer" title="Добавить PIP слой">+ Add PIP</div>';
+            pipTrackEl.querySelector('.ive-tl-empty-abs')?.addEventListener('click', () => addPipBtn?.click());
+            if (pipLblEl) {
+                pipLblEl.style.height = emptyH;
+                const lbl = document.createElement('div');
+                lbl.className = 'ive-pip-lbl-row';
+                lbl.style.cssText = 'cursor:pointer;color:var(--accent);';
+                lbl.title = 'Добавить PIP слой';
+                if (_pipHandle) lbl.appendChild(_pipHandle);
+                const _emptyTxt = document.createElement('span');
+                _emptyTxt.textContent = 'PIP';
+                lbl.appendChild(_emptyTxt);
+                lbl.addEventListener('click', () => addPipBtn?.click());
+                pipLblEl.appendChild(lbl);
+            }
             return;
         }
-        S.pipLayers.forEach((pip, pi) => {
+
+        pipTrackEl.style.height = (sorted.length * ROW_H) + 'px';
+        if (pipLblEl) pipLblEl.style.height = (sorted.length * ROW_H) + 'px';
+
+        sorted.forEach(([pi, pip], rowIdx) => {
             const start = pip.startTime || 0;
             const end   = pip.endTime ?? (start + 5);
-            const left  = start * S.pxPerSec;
+            const leftPx = start * S.pxPerSec;
             const w     = Math.max(16, (end - start) * S.pxPerSec);
 
-            const item = document.createElement('div');
+            if (pip._empty) {
+                // Label
+                if (pipLblEl) {
+                    const lbl = document.createElement('div');
+                    lbl.className = 'ive-pip-lbl-row';
+                    lbl.dataset.rowIdx = rowIdx;
+                    if (rowIdx === 0 && _pipHandle) lbl.appendChild(_pipHandle);
+                    const lblTxt = document.createElement('span');
+                    lblTxt.textContent = 'PIP (пустой)';
+                    lblTxt.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:7px;opacity:.6;';
+                    lbl.appendChild(lblTxt);
+                    pipLblEl.appendChild(lbl);
+                }
+                // Track body placeholder
+                const phRow = document.createElement('div');
+                phRow.className = 'ive-pip-track-row';
+                phRow.style.width = contentW + 'px';
+                const ph = document.createElement('div');
+                ph.className = 'ive-tl-empty-abs';
+                ph.textContent = 'Нажмите для добавления медиа';
+                ph.style.cssText = 'cursor:pointer;font-size:9px;';
+                ph.addEventListener('click', () => { S._fillEmptyPipId = pip.id; addPipBtn?.click(); });
+                phRow.appendChild(ph);
+                pipTrackEl.appendChild(phRow);
+                return;
+            }
+
+            // ── Label row ────────────────────────────────────────────────
+            if (pipLblEl) {
+                const lbl = document.createElement('div');
+                lbl.className = 'ive-pip-lbl-row';
+                lbl.dataset.rowIdx = rowIdx;
+
+                if (rowIdx === 0 && _pipHandle) lbl.appendChild(_pipHandle);
+
+                const handle = document.createElement('span');
+                handle.className = 'ive-pip-drag-handle';
+                handle.textContent = '⠿';
+                handle.title = 'Перетащить для изменения порядка';
+                lbl.appendChild(handle);
+
+                const lblTxt = document.createElement('span');
+                lblTxt.textContent = `PIP ${pi + 1}`;
+                lblTxt.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:7px;';
+                lbl.appendChild(lblTxt);
+
+                pipLblEl.appendChild(lbl);
+
+                // Drag-to-reorder
+                handle.addEventListener('mousedown', e => {
+                    e.stopPropagation(); e.preventDefault();
+                    const lblRect = pipLblEl.getBoundingClientRect();
+                    let lastDropIdx = rowIdx;
+
+                    const ghost = document.createElement('div');
+                    ghost.style.cssText = `position:fixed;left:${lblRect.left}px;width:${lblRect.width}px;height:${ROW_H}px;background:rgba(74,158,255,.18);border:1px dashed #4a9eff;border-radius:2px;pointer-events:none;z-index:9999;box-sizing:border-box;`;
+                    ghost.style.top = (lblRect.top + rowIdx * ROW_H) + 'px';
+                    document.body.appendChild(ghost);
+
+                    const indicator = document.createElement('div');
+                    indicator.style.cssText = `position:fixed;left:${lblRect.left}px;width:${lblRect.width}px;height:2px;background:#4a9eff;pointer-events:none;z-index:10000;border-radius:1px;`;
+                    document.body.appendChild(indicator);
+
+                    const onMove = ev => {
+                        const relY = ev.clientY - lblRect.top;
+                        const hoverRow = Math.max(0, Math.min(sorted.length - 1, Math.floor(relY / ROW_H)));
+                        lastDropIdx = hoverRow;
+                        ghost.style.top = (lblRect.top + hoverRow * ROW_H) + 'px';
+                        const indicatorY = lblRect.top + hoverRow * ROW_H + (hoverRow <= rowIdx ? 0 : ROW_H);
+                        indicator.style.top = indicatorY + 'px';
+                    };
+                    const onUp = () => {
+                        document.removeEventListener('mousemove', onMove);
+                        document.removeEventListener('mouseup', onUp);
+                        ghost.remove(); indicator.remove();
+                        if (lastDropIdx !== rowIdx) {
+                            // Swap orders between the two PIPs
+                            const [, fromPip] = sorted[rowIdx];
+                            const [, toPip]   = sorted[lastDropIdx];
+                            const tmp = fromPip.order ?? 0;
+                            fromPip.order = toPip.order ?? 0;
+                            toPip.order   = tmp;
+                            // Renormalize all orders to 0..N-1 (descending by sorted position)
+                            const re = [...S.pipLayers].sort((a, b) => (b.order ?? 0) - (a.order ?? 0));
+                            re.forEach((p, i) => { p.order = re.length - 1 - i; });
+                            _pushHistory(); S.dirty = true;
+                            renderTimeline(); renderPreview();
+                        }
+                    };
+                    document.addEventListener('mousemove', onMove);
+                    document.addEventListener('mouseup', onUp);
+                });
+            }
+
+            // ── Track row ─────────────────────────────────────────────────
+            const row = document.createElement('div');
+            row.className = 'ive-pip-track-row';
+            row.style.width = contentW + 'px';
+            row.dataset.pi = pi;
+
             const isMultiPipSel = S.selPipIdxs.size > 1 && S.selPipIdxs.has(pi);
+            const item = document.createElement('div');
             item.className = `ive-tl-pip-item${pi === S.selPipIdx ? ' sel' : ''}${isMultiPipSel ? ' multi-sel' : ''}`;
-            item.style.left  = left + 'px';
+            item.style.left  = leftPx + 'px';
             item.style.width = w + 'px';
             item.textContent = pip.original || pip.file;
 
-            // Right resize handle
             const rh = document.createElement('div');
             rh.className = 'ive-tl-pip-resize';
             item.appendChild(rh);
@@ -3236,13 +4218,14 @@ export async function init() {
                         S.selPipIdxs.delete(pi);
                         if (S.selPipIdx === pi) S.selPipIdx = [...S.selPipIdxs].at(-1) ?? -1;
                     } else {
-                        S.selPipIdxs.add(pi);
-                        S.selPipIdx = pi;
+                        S.selPipIdxs.add(pi); S.selPipIdx = pi;
                     }
                     S.selIdx = -1; S.selIdxs = new Set();
                 } else {
                     S.selPipIdx = pi; S.selPipIdxs = new Set([pi]);
-                    S.selIdx = -1; S.selIdxs = new Set(); S.selAudioIdx = -1; S.selAudioIdxs = new Set(); S.selSubIdx = -1; S.selSubIdxs = new Set();
+                    S.selIdx = -1; S.selIdxs = new Set();
+                    S.selAudioIdx = -1; S.selAudioIdxs = new Set();
+                    S.selSubIdx = -1; S.selSubIdxs = new Set();
                 }
                 S.activeTab = 'slide';
                 document.querySelectorAll('.ive-ptab').forEach(b => b.classList.remove('active'));
@@ -3250,15 +4233,15 @@ export async function init() {
                 renderTimeline(); renderProps(); renderPreview();
             });
 
-            // Drag to move pip timing (and all selected PIPs together)
             item.addEventListener('mousedown', e => {
                 if (e.button !== 0 || e.target === rh) return;
-                if (e.ctrlKey) return; // Ctrl+click handled by click event
+                if (e.ctrlKey) return;
                 e.preventDefault(); e.stopPropagation();
-                // Preserve multi-selection if this pip is already selected
                 if (!S.selPipIdxs.has(pi)) {
                     S.selPipIdx = pi; S.selPipIdxs = new Set([pi]);
-                    S.selIdx = -1; S.selIdxs = new Set(); S.selAudioIdx = -1; S.selAudioIdxs = new Set(); S.selSubIdx = -1; S.selSubIdxs = new Set();
+                    S.selIdx = -1; S.selIdxs = new Set();
+                    S.selAudioIdx = -1; S.selAudioIdxs = new Set();
+                    S.selSubIdx = -1; S.selSubIdxs = new Set();
                 } else {
                     S.selPipIdx = pi;
                 }
@@ -3268,12 +4251,6 @@ export async function init() {
                     const p2 = S.pipLayers[pi2] || {};
                     const st = p2.startTime || 0;
                     return { pi: pi2, start0: st, dur: (p2.endTime ?? (st + 5)) - st };
-                });
-                // Capture initial positions of other selected types for cross-type group drag
-                const _dragInitAudio = [...S.selAudioIdxs].map(idx => ({ idx, startOffset: S.audioTracks[idx]?.startOffset || 0 }));
-                const _dragInitSub = [...S.selSubIdxs].map(idx => {
-                    const s = S.subtitles[idx] || {};
-                    return { idx, start: s.start || 0, dur: (s.end || 3) - (s.start || 0) };
                 });
                 let moved = false;
                 const onMove = ev => {
@@ -3285,14 +4262,6 @@ export async function init() {
                         p2.startTime = Math.max(0, start0 + dx);
                         p2.endTime   = p2.startTime + d;
                     });
-                    _dragInitAudio.forEach(({ idx, startOffset }) => {
-                        if (S.audioTracks[idx]) S.audioTracks[idx].startOffset = Math.max(0, Math.round((startOffset + dx) * 10) / 10);
-                    });
-                    _dragInitSub.forEach(({ idx, start, dur }) => {
-                        const s = S.subtitles[idx]; if (!s) return;
-                        const newStart = Math.max(0, Math.round((start + dx) * 10) / 10);
-                        s.start = newStart; s.end = Math.round((newStart + dur) * 10) / 10;
-                    });
                     S.dirty = true; _renderPipTrack(total);
                 };
                 const onUp = () => {
@@ -3304,7 +4273,6 @@ export async function init() {
                 document.addEventListener('mouseup', onUp);
             });
 
-            // Resize end time
             rh.addEventListener('mousedown', e => {
                 e.stopPropagation(); e.preventDefault();
                 const sx = e.clientX;
@@ -3312,8 +4280,7 @@ export async function init() {
                 let moved = false;
                 const onMove = ev => {
                     moved = true;
-                    const dx = (ev.clientX - sx) / S.pxPerSec;
-                    pip.endTime = Math.max((pip.startTime || 0) + 0.1, end0 + dx);
+                    pip.endTime = Math.max((pip.startTime || 0) + 0.1, end0 + (ev.clientX - sx) / S.pxPerSec);
                     S.dirty = true; _renderPipTrack(total);
                 };
                 const onUp = () => {
@@ -3325,15 +4292,30 @@ export async function init() {
                 document.addEventListener('mouseup', onUp);
             });
 
-            pipTrackEl.appendChild(item);
+            row.appendChild(item);
+            pipTrackEl.appendChild(row);
         });
     }
 
     function _renderPropsPip(pip, idx) {
+        _normalizePip(pip);
         const isVideo = pip.type === 'video';
+        const totalPip = S.pipLayers.length;
+        const seOpts = PIP_START_EFFECTS.map(e => `<option value="${e.value}"${(pip.startEffect?.type||'none')===e.value?' selected':''}>${e.label}</option>`).join('');
+        const eeOpts = PIP_END_EFFECTS.map(e =>   `<option value="${e.value}"${(pip.endEffect?.type||'none')===e.value?' selected':''}>${e.label}</option>`).join('');
+        const ceOpts = PIP_CONTINUOUS_EFFECTS.map(e => `<option value="${e.value}"${(pip.continuousEffect?.type||'none')===e.value?' selected':''}>${e.label}</option>`).join('');
+
         propsBody.innerHTML = `<div class="ive-form">
             <div style="font-size:10px;color:var(--text-dim);padding:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${eh(pip.original || pip.file)}">PIP: ${eh(pip.original || pip.file)}</div>
-            <div class="ive-row2">
+
+            <div style="font-size:11px;font-weight:600;color:var(--text-dim);margin:4px 0 2px">Слой (порядок)</div>
+            <div class="ive-row2" style="align-items:center;gap:4px">
+                <span style="font-size:11px">Позиция: ${(pip.order??0)+1} из ${totalPip}</span>
+                <button class="btn btn-sm" id="pip-layer-up" ${(pip.order??0) >= totalPip-1 ? 'disabled' : ''} title="Выше (поверх других)">▲</button>
+                <button class="btn btn-sm" id="pip-layer-down" ${(pip.order??0) <= 0 ? 'disabled' : ''} title="Ниже (под другими)">▼</button>
+            </div>
+
+            <div class="ive-row2" style="margin-top:6px">
                 <label class="ive-label">Нач.(с)<input class="ive-input" type="number" id="pip-start" min="0" step="0.1" value="${(pip.startTime || 0).toFixed(1)}"></label>
                 <label class="ive-label">Кон.(с)<input class="ive-input" type="number" id="pip-end"   min="0" step="0.1" value="${(pip.endTime ?? ((pip.startTime||0)+5)).toFixed(1)}"></label>
             </div>
@@ -3366,10 +4348,41 @@ export async function init() {
                     <option value="1"${(!pip.speed||pip.speed===1)?' selected':''}>1× (норма)</option>
                     <option value="1.5"${(pip.speed??1)===1.5?' selected':''}>1.5×</option>
                     <option value="2"${(pip.speed??1)===2?' selected':''}>2×</option>
+                    <option value="4"${(pip.speed??1)===4?' selected':''}>4×</option>
+                    <option value="8"${(pip.speed??1)===8?' selected':''}>8×</option>
+                    <option value="16"${(pip.speed??1)===16?' selected':''}>16×</option>
+                    <option value="32"${(pip.speed??1)===32?' selected':''}>32×</option>
                 </select>
             </label>
             <label class="ive-label">Вход (с)<input class="ive-input" type="number" id="pip-trimin" min="0" step="0.1" value="${pip.trimIn||0}"></label>
             ` : ''}
+
+            <div style="font-size:11px;font-weight:600;color:var(--text-dim);margin:8px 0 2px">Эффект появления</div>
+            <label class="ive-label">Тип<select class="ive-select" id="pip-se-type">${seOpts}</select></label>
+            <label class="ive-label" id="pip-se-dur-row" ${(pip.startEffect?.type||'none')==='none'?'hidden':''}>Длит.(с)
+                <input class="ive-input" type="number" id="pip-se-dur" min="0.1" max="10" step="0.1" value="${pip.startEffect?.duration??0.5}">
+            </label>
+
+            <div style="font-size:11px;font-weight:600;color:var(--text-dim);margin:6px 0 2px">Эффект исчезновения</div>
+            <label class="ive-label">Тип<select class="ive-select" id="pip-ee-type">${eeOpts}</select></label>
+            <label class="ive-label" id="pip-ee-dur-row" ${(pip.endEffect?.type||'none')==='none'?'hidden':''}>Длит.(с)
+                <input class="ive-input" type="number" id="pip-ee-dur" min="0.1" max="10" step="0.1" value="${pip.endEffect?.duration??0.5}">
+            </label>
+
+            <div style="font-size:11px;font-weight:600;color:var(--text-dim);margin:6px 0 2px">Непрерывная анимация</div>
+            <label class="ive-label">Тип<select class="ive-select" id="pip-ce-type">${ceOpts}</select></label>
+            <label class="ive-label" id="pip-ce-int-row" ${(pip.continuousEffect?.type||'none')==='none'?'hidden':''}>Интенсивность
+                <div class="ive-range-row">
+                    <input class="ive-range" type="range" id="pip-ce-int" min="5" max="100" step="5" value="${pip.continuousEffect?.intensity??30}">
+                    <span class="ive-range-val" id="pip-ce-int-v">${pip.continuousEffect?.intensity??30}</span>
+                </div>
+            </label>
+            <label class="ive-label">Скорость эффектов PIP
+                <select class="ive-select" id="pip-eff-speed">
+                    ${[0.25,0.5,1,2,4,8,16,32].map(v=>`<option value="${v}"${(pip.effectSpeed??1)==v?' selected':''}>${v===1?'1× (норма)':v+'×'}</option>`).join('')}
+                </select>
+            </label>
+
             <button class="btn btn-sm danger" id="pip-delete" style="margin-top:8px">Удалить PIP</button>
         </div>`;
 
@@ -3405,11 +4418,79 @@ export async function init() {
             wire('speed',   'speed',    v => parseFloat(v)||1);
             wire('trimin',  'trimIn',   v => Math.max(0, parseFloat(v)||0));
         }
+
+        // Layer order
+        $('pip-layer-up')?.addEventListener('click', () => {
+            const curOrder = pip.order ?? 0;
+            const above = S.pipLayers.find(p => p !== pip && (p.order ?? 0) === curOrder + 1);
+            if (above) above.order = curOrder;
+            pip.order = curOrder + 1;
+            _pushHistory(); S.dirty = true; renderProps(); renderPreview();
+        });
+        $('pip-layer-down')?.addEventListener('click', () => {
+            const curOrder = pip.order ?? 0;
+            if (curOrder <= 0) return;
+            const below = S.pipLayers.find(p => p !== pip && (p.order ?? 0) === curOrder - 1);
+            if (below) below.order = curOrder;
+            pip.order = curOrder - 1;
+            _pushHistory(); S.dirty = true; renderProps(); renderPreview();
+        });
+
+        // Start effect
+        const seTypeEl = $('pip-se-type'), seDurRow = $('pip-se-dur-row');
+        seTypeEl?.addEventListener('change', () => {
+            pip.startEffect = pip.startEffect || {};
+            pip.startEffect.type = seTypeEl.value;
+            if (seDurRow) seDurRow.hidden = seTypeEl.value === 'none';
+            S.dirty = true; renderPreview();
+        });
+        $('pip-se-dur')?.addEventListener('input', e => {
+            pip.startEffect = pip.startEffect || {};
+            pip.startEffect.duration = Math.max(0.1, parseFloat(e.target.value) || 0.5);
+            S.dirty = true; renderPreview();
+        });
+
+        // End effect
+        const eeTypeEl = $('pip-ee-type'), eeDurRow = $('pip-ee-dur-row');
+        eeTypeEl?.addEventListener('change', () => {
+            pip.endEffect = pip.endEffect || {};
+            pip.endEffect.type = eeTypeEl.value;
+            if (eeDurRow) eeDurRow.hidden = eeTypeEl.value === 'none';
+            S.dirty = true; renderPreview();
+        });
+        $('pip-ee-dur')?.addEventListener('input', e => {
+            pip.endEffect = pip.endEffect || {};
+            pip.endEffect.duration = Math.max(0.1, parseFloat(e.target.value) || 0.5);
+            S.dirty = true; renderPreview();
+        });
+
+        // Continuous effect
+        const ceTypeEl = $('pip-ce-type'), ceIntRow = $('pip-ce-int-row');
+        ceTypeEl?.addEventListener('change', () => {
+            pip.continuousEffect = pip.continuousEffect || {};
+            pip.continuousEffect.type = ceTypeEl.value;
+            if (ceIntRow) ceIntRow.hidden = ceTypeEl.value === 'none';
+            S.dirty = true; renderPreview();
+        });
+        $('pip-ce-int')?.addEventListener('input', e => {
+            const v = parseInt(e.target.value);
+            pip.continuousEffect = pip.continuousEffect || {};
+            pip.continuousEffect.intensity = v;
+            const vEl = $('pip-ce-int-v'); if (vEl) vEl.textContent = v;
+            S.dirty = true; renderPreview();
+        });
+        $('pip-eff-speed')?.addEventListener('change', e => {
+            pip.effectSpeed = parseFloat(e.target.value) || 1;
+            S.dirty = true; renderPreview();
+        });
+
         $('pip-delete').addEventListener('click', () => {
             const el = _pipEls.get(pip.id);
             if (el?.wrapper?.parentNode) el.wrapper.parentNode.removeChild(el.wrapper);
             _pipEls.delete(pip.id);
             S.pipLayers.splice(idx, 1);
+            // Reindex orders
+            S.pipLayers.forEach((p, i) => { p.order = i; });
             S.selPipIdx = -1;
             _pushHistory();
             S.dirty = true;
@@ -3557,12 +4638,25 @@ export async function init() {
             const r = await fetch(endpoint, { method: 'POST', body: fd });
             const d = await r.json();
             if (!r.ok) { toast(d.detail || 'Ошибка', 'err'); return; }
-            const pip = {
-                id: uid(), file: d.name, fileUrl: d.url, type: isVideo ? 'video' : 'image',
-                original: d.original, startTime: S.currentTime, endTime: S.currentTime + 5,
-                x: 5, y: 5, w: 30, h: 20, opacity: 1, volume: 0, speed: 1, trimIn: 0, effects: []
-            };
-            S.pipLayers.push(pip);
+            const _emptyIdx = S._fillEmptyPipId
+                ? S.pipLayers.findIndex(p => p.id === S._fillEmptyPipId)
+                : -1;
+            delete S._fillEmptyPipId;
+            if (_emptyIdx >= 0) {
+                Object.assign(S.pipLayers[_emptyIdx], {
+                    file: d.name, fileUrl: d.url, type: isVideo ? 'video' : 'image',
+                    original: d.original, _empty: false,
+                });
+                _normalizePip(S.pipLayers[_emptyIdx]);
+            } else {
+                const pip = _normalizePip({
+                    id: uid(), file: d.name, fileUrl: d.url, type: isVideo ? 'video' : 'image',
+                    original: d.original, startTime: S.currentTime, endTime: S.currentTime + 5,
+                    x: 5, y: 5, w: 30, h: 20, opacity: 1, volume: 0, speed: 1, trimIn: 0,
+                    effects: [], order: S.pipLayers.length,
+                });
+                S.pipLayers.push(pip);
+            }
             _pushHistory();
             S.selPipIdx = S.pipLayers.length - 1;
             S.dirty = true;
@@ -3921,8 +5015,9 @@ export async function init() {
                             original: existing.original };
                         base.transition  = base.transition  || { type: 'none', duration: 0.5 };
                         base.effects     = base.effects     || [];
-                        base.startEffect = base.startEffect || { type: 'none', duration: 1.0 };
-                        base.endEffect   = base.endEffect   || { type: 'none', duration: 1.0 };
+                        base.startEffect      = base.startEffect      || { type: 'none', duration: 1.0 };
+                        base.endEffect        = base.endEffect        || { type: 'none', duration: 1.0 };
+                        base.continuousEffect = base.continuousEffect || { type: 'none', intensity: 30 };
                         if (existing.type === 'video') {
                             base.duration = tmplSlide.duration || existing.duration || 5;
                             delete base.imgScale; delete base.imgOffsetX; delete base.imgOffsetY; delete base.crop;
@@ -4061,6 +5156,7 @@ export async function init() {
             S.isTemplateMode = false; S.editingTemplateId = null;
             S.clips       = newClips;
             S.audioTracks = newAudio;
+            S.audioLanes = [...new Set((S.audioTracks).map(t => t.laneIndex ?? 0))];
             S.subtitles   = newSubs;
             _pipEls.forEach(({ wrapper }) => { if (wrapper?.parentNode) wrapper.parentNode.removeChild(wrapper); });
             _pipEls.clear();
@@ -4135,6 +5231,7 @@ export async function init() {
             S.projectId = d.id; S.projectName = d.name;
             S.isTemplateMode = false; S.editingTemplateId = null;
             S.clips = d.slides || []; S.audioTracks = d.audio || [];
+            S.audioLanes = [...new Set((S.audioTracks).map(t => t.laneIndex ?? 0))];
             // Load independent subtitles
             S.subtitles = d.subtitles || [];
             // Migrate old per-clip subtitles to independent track if no top-level subs exist
@@ -4158,14 +5255,19 @@ export async function init() {
             // Load PIP layers
             _pipEls.forEach(({ wrapper }) => { if (wrapper?.parentNode) wrapper.parentNode.removeChild(wrapper); });
             _pipEls.clear();
-            S.pipLayers = d.pip || d.pipLayers || [];
+            S.pipLayers = (d.pip || d.pipLayers || []).map(_normalizePip);
+            S.trackOrder = d.trackOrder || ['video', 'audio', 'subtitle', 'pip'];
             S.selPipIdx = -1; S.selIdxs = new Set();
             S.selIdx = S.clips.length ? 0 : -1; S.dirty = false;
+            S.canvasCrop = d.canvasCrop || null;
+            _cancelCropMode();
+            if (cropBtn) cropBtn.classList.toggle('ive-crop-active', !!S.canvasCrop);
             if ($('ive-project-name')) $('ive-project-name').value = S.projectName;
             _applyExportSettings(d.export_settings);
             _updateSaveBtn();
             _historyStack.length = 0; _historyIdx = -1; _historyMinIdx = 0;
             clearTimeout(_propsHistTimer); _propsHistTimer = null;
+            _updatePreviewSize();
             renderAll(); _pushHistory(); await loadProjectsList();
             toast('Проект загружен', 'ok');
         } catch (err) { toast(err.message, 'err'); }
@@ -4238,27 +5340,43 @@ export async function init() {
             S.projectName = d.name;
             S.clips = d.slides || [];
             S.audioTracks = d.audio || [];
+            S.audioLanes = [...new Set((S.audioTracks).map(t => t.laneIndex ?? 0))];
             S.subtitles = d.subtitles || [];
             _pipEls.forEach(({ wrapper }) => { if (wrapper?.parentNode) wrapper.parentNode.removeChild(wrapper); });
             _pipEls.clear();
-            S.pipLayers = d.pip || d.pipLayers || [];
+            S.pipLayers = (d.pip || d.pipLayers || []).map(_normalizePip);
+            S.trackOrder = d.trackOrder || ['video', 'audio', 'subtitle', 'pip'];
             S.selPipIdx = -1; S.selIdxs = new Set();
             S.selIdx = S.clips.length ? 0 : -1; S.dirty = false;
+            S.canvasCrop = d.canvasCrop || null;
+            _cancelCropMode();
+            if (cropBtn) cropBtn.classList.toggle('ive-crop-active', !!S.canvasCrop);
             if ($('ive-project-name')) $('ive-project-name').value = S.projectName;
             _applyExportSettings(d.export_settings);
             _updateSaveBtn();
             _historyStack.length = 0; _historyIdx = -1; _historyMinIdx = 0;
             clearTimeout(_propsHistTimer); _propsHistTimer = null;
+            _updatePreviewSize();
             renderAll(); _pushHistory();
             await loadTemplatesList();
             toast('Шаблон открыт для редактирования', 'ok');
         } catch (err) { toast(err.message, 'err'); }
     }
 
+    function _buildTracksMetadata() {
+        const TYPE_MAP  = { video: 'clip', audio: 'audio', subtitle: 'subtitle', pip: 'pip' };
+        const TITLE_MAP = { video: 'Clip 1', audio: 'Audio 1', subtitle: 'Subtitle 1', pip: 'PIP 1' };
+        return S.trackOrder.map((key, order) => ({
+            type: TYPE_MAP[key] || key,
+            title: TITLE_MAP[key] || key,
+            order,
+        }));
+    }
+
     async function _saveProject() {
         if (S.isTemplateMode && S.editingTemplateId) {
             // Save back to template
-            const body = { name: S.projectName, slides: S.clips, audio: S.audioTracks, subtitles: S.subtitles, pip: S.pipLayers, export_settings: _getExportSettings() };
+            const body = { name: S.projectName, slides: S.clips, audio: S.audioTracks, subtitles: S.subtitles, pip: S.pipLayers.filter(p => !p._empty), trackOrder: S.trackOrder, tracks: _buildTracksMetadata(), export_settings: _getExportSettings(), canvasCrop: S.canvasCrop || null };
             try {
                 const r = await fetch(`/api/imgvid/templates/${S.editingTemplateId}`, {
                     method: 'PUT',
@@ -4274,7 +5392,7 @@ export async function init() {
             } catch (err) { toast(err.message, 'err'); }
             return;
         }
-        const body = { id: S.projectId, name: S.projectName, slides: S.clips, audio: S.audioTracks, subtitles: S.subtitles, pip: S.pipLayers, export_settings: _getExportSettings() };
+        const body = { id: S.projectId, name: S.projectName, slides: S.clips, audio: S.audioTracks, subtitles: S.subtitles, pip: S.pipLayers.filter(p => !p._empty), trackOrder: S.trackOrder, tracks: _buildTracksMetadata(), export_settings: _getExportSettings(), canvasCrop: S.canvasCrop || null };
         try {
             const r = await fetch(S.projectId ? `/api/imgvid/projects/${S.projectId}` : '/api/imgvid/projects', {
                 method: S.projectId ? 'PUT' : 'POST',
@@ -4301,12 +5419,13 @@ export async function init() {
 
         exportBtn.disabled = true;
         exportProg.hidden  = false;
+        if (cancelExportBtn) cancelExportBtn.style.display = '';
         exportStatus.textContent = 'Подготовка…';
         exportStatus.className   = 'status busy';
         progFill.style.width = '2%';
         progPct.textContent  = '0%';
 
-        const projectPayload = JSON.stringify({ slides: S.clips, audio: S.audioTracks, subtitles: S.subtitles, pip: S.pipLayers });
+        const projectPayload = JSON.stringify({ slides: S.clips, audio: S.audioTracks, subtitles: S.subtitles, pip: S.pipLayers.filter(p => !p._empty), trackOrder: S.trackOrder, tracks: _buildTracksMetadata(), canvasCrop: S.canvasCrop || null });
 
         if (isAudioOnly) {
             if (!S.audioTracks.length) { exportBtn.disabled = false; toast('Нет аудиодорожек для экспорта', 'warn'); return; }
@@ -4324,6 +5443,7 @@ export async function init() {
                     },
                     done(payload) {
                         exportBtn.disabled = false;
+                        if (cancelExportBtn) cancelExportBtn.style.display = 'none';
                         progFill.style.width = '100%'; progPct.textContent = '100%';
                         exportStatus.textContent = '✓ Готово'; exportStatus.className = 'status ok';
                         toast('Аудио экспортировано!', 'ok'); log('Аудио экспортировано: ' + payload.filename, 'done');
@@ -4334,8 +5454,17 @@ export async function init() {
                     },
                     error(msg) {
                         exportBtn.disabled = false;
+                        if (cancelExportBtn) cancelExportBtn.style.display = 'none';
                         exportStatus.textContent = msg; exportStatus.className = 'status err';
                         toast(msg, 'err'); log(msg, 'err');
+                    },
+                    cancelled(msg) {
+                        exportBtn.disabled = false;
+                        if (cancelExportBtn) cancelExportBtn.style.display = 'none';
+                        exportStatus.textContent = 'Отменено'; exportStatus.className = 'status';
+                        progFill.style.width = '0%'; progPct.textContent = '0%';
+                        toast('Экспорт отменён', 'info'); log('Export cancelled by user', 'warn');
+                        setTimeout(() => { exportProg.hidden = true; }, 3000);
                     },
                 });
             } catch (err) { exportBtn.disabled = false; toast(err.message, 'err'); }
@@ -4353,6 +5482,17 @@ export async function init() {
         fd.append('audio_bitrate',  settings.audioBitrate);
         fd.append('audio_sr',       settings.audioSR);
         fd.append('audio_ch',       settings.audioCh);
+        if (S.canvasCrop) {
+            const c = S.canvasCrop;
+            const { w: expW, h: expH } = expModal.getResolution();
+            const sx = c.resW ? expW / c.resW : 1;
+            const sy = c.resH ? expH / c.resH : 1;
+            const cx = Math.round(c.x * sx);
+            const cy = Math.round(c.y * sy);
+            const cw = Math.round(c.w * sx);
+            const ch = Math.round(c.h * sy);
+            fd.append('canvas_crop', `${cx},${cy},${cw},${ch}`);
+        }
         try {
             await synthesizeStream('/api/imgvid/export', { method: 'POST', body: fd }, {
                 progress(val, desc) {
@@ -4364,6 +5504,7 @@ export async function init() {
                 },
                 done(payload) {
                     exportBtn.disabled   = false;
+                    if (cancelExportBtn) cancelExportBtn.style.display = 'none';
                     progFill.style.width = '100%'; progPct.textContent = '100%';
                     exportStatus.textContent = '✓ Готово'; exportStatus.className = 'status ok';
                     toast('Экспорт завершён!', 'ok'); log('Видео экспортировано: ' + payload.filename, 'done');
@@ -4373,8 +5514,17 @@ export async function init() {
                 },
                 error(msg) {
                     exportBtn.disabled = false;
+                    if (cancelExportBtn) cancelExportBtn.style.display = 'none';
                     exportStatus.textContent = msg; exportStatus.className = 'status err';
                     toast(msg, 'err'); log(msg, 'err');
+                },
+                cancelled(msg) {
+                    exportBtn.disabled = false;
+                    if (cancelExportBtn) cancelExportBtn.style.display = 'none';
+                    exportStatus.textContent = 'Отменено'; exportStatus.className = 'status';
+                    progFill.style.width = '0%'; progPct.textContent = '0%';
+                    toast('Экспорт отменён', 'info'); log('Export cancelled by user', 'warn');
+                    setTimeout(() => { exportProg.hidden = true; }, 3000);
                 },
             });
         } catch (err) { exportBtn.disabled = false; toast(err.message, 'err'); }
@@ -4428,6 +5578,7 @@ export async function init() {
                 JSON.stringify(prev) === JSON.stringify({
                     clips: S.clips, audioTracks: S.audioTracks,
                     subtitles: S.subtitles, pipLayers: S.pipLayers,
+                    trackOrder: S.trackOrder,
                 })
             ) return;
         }
@@ -4437,6 +5588,7 @@ export async function init() {
             audioTracks: JSON.parse(JSON.stringify(S.audioTracks)),
             subtitles:   JSON.parse(JSON.stringify(S.subtitles)),
             pipLayers:   JSON.parse(JSON.stringify(S.pipLayers)),
+            trackOrder:  [...S.trackOrder],
         });
         if (_historyStack.length > 50) {
             _historyStack.shift();
@@ -4452,6 +5604,7 @@ export async function init() {
         S.audioTracks = JSON.parse(JSON.stringify(snap.audioTracks));
         S.subtitles   = JSON.parse(JSON.stringify(snap.subtitles));
         S.pipLayers   = JSON.parse(JSON.stringify(snap.pipLayers));
+        if (snap.trackOrder) S.trackOrder = [...snap.trackOrder];
         // Remove DOM wrappers for PIPs that no longer exist
         const validIds = new Set(S.pipLayers.map(p => p.id));
         for (const [id, el] of [..._pipEls]) {
@@ -4694,10 +5847,14 @@ export async function init() {
         S.selPipIdx = -1; S.selIdxs = new Set();
         S.selSubIdxs = new Set(); S.selPipIdxs = new Set(); S.selAudioIdxs = new Set();
         S.pipLayers = [];
+        S.trackOrder = ['video', 'audio', 'subtitle', 'pip'];
         S.isTemplateMode = false; S.editingTemplateId = null;
+        S.canvasCrop = null;
         S.dirty = false; S.currentTime = 0;
         _pipEls.forEach(({ wrapper }) => { if (wrapper?.parentNode) wrapper.parentNode.removeChild(wrapper); });
         _pipEls.clear();
+        _cancelCropMode();
+        if (cropBtn) cropBtn.classList.remove('ive-crop-active');
         _historyStack.length = 0; _historyIdx = -1; _historyMinIdx = 0;
         clearTimeout(_propsHistTimer); _propsHistTimer = null;
         _updateSaveBtn();
