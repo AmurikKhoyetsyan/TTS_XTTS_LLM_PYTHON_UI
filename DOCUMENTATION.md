@@ -93,10 +93,10 @@ app.py
 │   ├── tts_xtts.py        — Coqui XTTS v2 синтез
 │   └── sse.py             — SSE-стриминг (поток прогресса)
 ├── core/
-│   ├── audio.py           — WAV ввод/вывод
-│   ├── history_manager.py — Управление аудиофайлами
+│   ├── audio.py           — WAV ввод/вывод; `save_named_audio()` → `.outputs/audio/`
+│   ├── history_manager.py — Управление аудиофайлами в `.outputs/audio/`
 │   ├── voice_manager.py   — Управление профилями голосов
-│   ├── log.py             — Логирование + прогресс-бар в терминале
+│   ├── log.py             — Логирование в stdout + `.outputs/logs/YYYY-MM-DD.log`; прогресс-бар
 │   └── schemas.py         — Pydantic-модели
 └── static/
     ├── index.html         — SPA (одна страница, 8 вкладок)
@@ -309,7 +309,7 @@ data: {"status": "❌ Ошибка: голос не найден"}
 
 #### Транскрипция (Whisper)
 
-> **Требование:** `openai-whisper` должен быть установлен. Первый запуск скачивает модель `base` (~140 MB).
+> **Примечание:** `openai-whisper` устанавливается автоматически из `requirements.txt`. При первом запуске транскрипции скачивается модель `base` (~140 MB).
 
 1. Загрузить аудио- или видеофайл
 2. Выбрать язык (ru / en / uk / de / fr / es / zh / ja)
@@ -569,7 +569,7 @@ data: {"status": "❌ Ошибка: голос не найден"}
 | FPS | 24, 25, 30, 60 |
 | Качество | Низкое (CRF 28) / Среднее (CRF 22) / Высокое (CRF 18) / Без потерь (CRF 0) |
 
-Прогресс отображается в Logger-панели. Готовый файл сохраняется в `.output/imgvid/output/`.
+Прогресс отображается в Logger-панели. Готовый файл сохраняется в `.outputs/imgvid/output/`.
 
 #### Проекты и шаблоны
 
@@ -1109,9 +1109,20 @@ word[i].end   = abs_start + (i+1) * word_dur   (для последнего — 
 tts/
 ├── app.py                   # Точка входа
 ├── requirements.txt
+├── README.md                # Обзор проекта, установка, запуск
+├── DOCUMENTATION.md         # Полная документация (этот файл)
 ├── CLAUDE.md                # Инструкции для Claude Code
-├── install_xtts.bat         # Установка XTTS v2
+├── install.bat              # Установщик всех зависимостей
+├── install_xtts.bat         # Дополнительная установка XTTS v2
 ├── add_voices_admin.bat     # Регистрация OneCore-голосов (admin)
+├── run.bat                  # Быстрый запуск приложения
+│
+├── docs/                    # Детальная документация
+│   ├── architecture.md      # Архитектура backend и frontend
+│   ├── api.md               # API-справочник
+│   ├── user-guide.md        # Руководство пользователя по вкладкам
+│   ├── developer-guide.md   # Руководство разработчика
+│   └── EDITOR.md            # Image Video Editor — таймлайн, эффекты, экспорт
 │
 ├── routers/                 # FastAPI-роутеры
 ├── services/                # TTS-сервисы (Windows, XTTS, SSE)
@@ -1148,39 +1159,48 @@ tts/
 │       │   ├── logs.js
 │       │   └── image-video.js
 │       └── imgvid/
-│           ├── constants.js
-│           ├── utils.js
-│           ├── waveform.js
-│           ├── export.js
-│           └── preview.js
+│           ├── constants.js      # TRANSITIONS (22), EFFECTS_DEF, FONTS, ANIMS
+│           ├── state.js          # разделяемое состояние S, стек undo, пул аудиоэлементов
+│           ├── utils.js          # uid, fmt, totalDur, clipAtTime, buildCSSFilter, snap
+│           ├── waveform.js       # drawWaveform(), probeAudioDuration() с кэшем
+│           ├── props.js          # панели свойств (слайд / аудио / субтитры / PIP)
+│           ├── timeline.js       # таймлайн: drag-drop, resize, snap, контекстные меню
+│           ├── playback.js       # togglePlay, seek, updateTransportUI, applyZoom
+│           ├── pip.js            # управление PIP-слоями
+│           ├── preview-render.js # canvas-рендерер превью (изображения, видео, эффекты)
+│           ├── media-list.js     # браузер медиафайлов
+│           ├── exp-modal.js      # диалог экспорта (формат, кодек, качество, SSE-прогресс)
+│           ├── export.js         # тонкие обёртки над exp-modal
+│           └── preview.js        # заглушки зума предпросмотра
 │
 ├── ffmpeg/                  # Локальный FFmpeg (авто-добавляется в PATH)
 │   └── ffmpeg.exe
 │
 ├── saved_voices/            # XTTS голосовые образцы (.wav)
-├── .logs/                   # Серверные логи (YYYY-MM-DD.log)
-│
-└── .output/
+└── .outputs/
     ├── audio/               # Синтезированные WAV-файлы
     ├── subtitle/            # SRT-файлы
     ├── video/
-    │   └── src/             # Загруженные исходные видео
-    ├── templates/           # JSON-пресеты стилей
+    │   └── src/             # Загруженные исходные видео (прожжённые видео — в video/)
+    ├── templates/           # JSON-пресеты стилей субтитров
+    ├── logs/                # Серверные логи (YYYY-MM-DD.log)
+    ├── saved_projects/      # .project ZIP-архивы, сохранённые на диск
+    ├── temp/                # Временные файлы (извлечённое аудио для транскрипции)
     └── imgvid/
         ├── images/          # Изображения для слайд-шоу (UUID)
         ├── clips/           # Видеоклипы (UUID)
         ├── audio/           # Аудиодорожки (UUID)
         ├── thumbs/          # Миниатюры клипов
         ├── projects/        # JSON-проекты
-        ├── output/          # Экспортированные видео
-        └── saved_projects/  # .project ZIP-архивы
+        ├── templates/       # JSON-шаблоны проектов редактора
+        └── output/          # Экспортированные видео и аудио
 ```
 
 ---
 
 ## 8. Зависимости
 
-### Обязательные
+### Обязательные (устанавливаются через `requirements.txt`)
 
 | Пакет | Назначение |
 |---|---|
@@ -1190,12 +1210,12 @@ tts/
 | `pyttsx3 >= 2.90` | Windows SAPI5 TTS |
 | `soundfile >= 0.12.0` | WAV ввод/вывод |
 | `numpy >= 1.22.0` | Аудиомассивы |
+| `openai-whisper >= 20230314` | Транскрипция речи (Whisper) — первый запуск скачивает модель `base` (~140 MB) |
 
-### Опциональные
+### Опциональные (устанавливаются отдельно через `install_xtts.bat`)
 
 | Пакет | Назначение | Размер |
 |---|---|---|
-| `openai-whisper >= 20230314` | Транскрипция речи | ~140 MB (модель base) |
 | `TTS` (Coqui) | XTTS v2 клонирование голоса | ~2 GB (модель) |
 | `torch` | Зависимость TTS (GPU опционально) | ~1–3 GB |
 
@@ -1282,8 +1302,8 @@ app_log("Синтез завершён", level="INFO", source="Windows")
 app_log("Файл не найден", level="ERROR", source="Video")
 ```
 
-Логи пишутся в stdout и в `.logs/YYYY-MM-DD.log`.
+Логи пишутся в stdout и в `.outputs/logs/YYYY-MM-DD.log`.
 
 ---
 
-*Документация актуальна для ветки `develop`. Обновлено: 2026-07-12.*
+*Документация актуальна для ветки `develop`. Обновлено: 2026-07-25.*

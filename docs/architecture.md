@@ -67,10 +67,10 @@ Heavy business logic is split into dedicated service modules:
 
 | File | Role |
 |------|------|
-| `audio.py` | WAV I/O; `save_named_audio()` writes to `.output/audio/` with timestamp filename |
-| `history_manager.py` | List / load / rename / delete files in `.output/audio/` |
+| `audio.py` | WAV I/O; `save_named_audio()` writes to `.outputs/audio/` with timestamp filename |
+| `history_manager.py` | List / load / rename / delete files in `.outputs/audio/` |
 | `voice_manager.py` | Saved voices CRUD under `saved_voices/` |
-| `log.py` | `app_log(msg, level, source)` — writes to stdout + `.logs/YYYY-MM-DD.log`; `print_progress()` — terminal progress bar |
+| `log.py` | `app_log(msg, level, source)` — writes to stdout + `.outputs/logs/YYYY-MM-DD.log`; `print_progress()` — terminal progress bar |
 | `schemas.py` | Pydantic shared models (`RenameBody`, `SaveSRTBody`) |
 
 ### Services (`services/`)
@@ -199,10 +199,12 @@ User clicks Export
 .outputs/
 ├── audio/           # Synthesised WAV files
 ├── subtitle/        # SRT files
-├── video/src/       # Uploaded source videos
-├── video/output/    # Subtitle-burned MP4 files
+├── video/
+│   └── src/         # Uploaded source videos (burned output goes directly in video/)
 ├── templates/       # Video subtitle style JSON templates
 ├── saved_projects/  # .project archives saved to disk
+├── logs/            # Server log files (YYYY-MM-DD.log)
+├── temp/            # Temporary files (extracted audio for transcription)
 └── imgvid/
     ├── images/      # Uploaded images
     ├── clips/       # Uploaded video clips
