@@ -230,17 +230,65 @@ function _renderSubOverlay(sub, subKey) {
     if (sub.karaokeEnable && sub.end > sub.start) {
         const karaokeColor = sub.karaokeColor || '#ffdd00';
         const normalColor  = sub.color || '#ffffff';
-        const wordArr  = sub.text.split(/\s+/).filter(Boolean);
-        const wordIdx  = Math.min(wordArr.length - 1, Math.floor(wordArr.length * elapsed / subDur));
-        const kmode    = sub.karaokeMode || 'word';
-        const tokens   = sub.text.split(/(\s+)/);
+        const kmode        = sub.karaokeMode || 'word';
+        const wordArr      = sub.text.split(/\s+/).filter(Boolean);
+        const n            = Math.max(1, wordArr.length);
+        const wordDurSec   = subDur / n;
+        const wordIdx      = Math.min(n - 1, Math.floor(n * elapsed / subDur));
+        const wordElapsed  = Math.max(0, elapsed - wordIdx * wordDurSec);
+        const tokens       = sub.text.split(/(\s+)/);
         let wi = 0;
         textEl.innerHTML = tokens.map(tok => {
-            if (/^\s+$/.test(tok)) return tok;
-            const idx = wi++;
-            const color = kmode === 'cumulative' ? (idx <= wordIdx ? karaokeColor : normalColor)
-                                                 : (idx === wordIdx ? karaokeColor : normalColor);
-            return `<span style="color:${color}">${eh(tok)}</span>`;
+            if (/^\s+$/.test(tok)) {
+                return sub.karaokeShowOnly
+                    ? `<span style="opacity:0">${tok}</span>`
+                    : tok;
+            }
+            const idx       = wi++;
+            const isActive  = idx === wordIdx;
+            const isBefore  = idx <= wordIdx;
+            const isLit     = kmode === 'cumulative' ? isBefore : isActive;
+
+            // show-only: hide non-active words but keep layout
+            if (sub.karaokeShowOnly && !isActive) {
+                return `<span style="opacity:0">${eh(tok)}</span>`;
+            }
+
+            const styles = [];
+
+            // Text color (skip if highlight-background mode — background will carry the accent)
+            if (!sub.karaokeHighlight) {
+                styles.push(`color:${isLit ? karaokeColor : normalColor}`);
+            } else {
+                styles.push(`color:${normalColor}`);
+            }
+
+            // Highlight background (marker effect)
+            if (sub.karaokeHighlight && isLit) {
+                styles.push(`background:${karaokeColor}`);
+                styles.push('padding:0 3px');
+                styles.push('border-radius:3px');
+            }
+
+            // Zoom current word
+            if (sub.karaokeZoomWord && isActive) {
+                styles.push('display:inline-block');
+                styles.push('font-size:1.4em');
+                styles.push('line-height:1');
+                styles.push('vertical-align:middle');
+                styles.push('font-weight:bold');
+            }
+
+            // Typewriter per word: reveal letters progressively within the word's slot
+            let content = eh(tok);
+            if (sub.karaokeTypewriterWord && isActive && wordDurSec > 0) {
+                const ratio     = Math.min(1, wordElapsed / wordDurSec);
+                const charsShow = Math.max(1, Math.ceil(tok.length * ratio));
+                content = eh(tok.slice(0, charsShow));
+            }
+
+            const styleStr = styles.join(';');
+            return styleStr ? `<span style="${styleStr}">${content}</span>` : content;
         }).join('');
     } else if (animType === 'typewriter') {
         // Character-by-character reveal — matches ASS export exactly.

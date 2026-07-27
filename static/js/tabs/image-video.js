@@ -2885,6 +2885,7 @@ export async function init() {
         propsBody.innerHTML = `
     <div class="ive-subs-header">
         <button class="btn btn-sm" id="pv-add-sub">+ Субтитр</button>
+        <button class="btn btn-sm" id="pv-save-srt" title="Сохранить субтитры как SRT">💾 SRT</button>
         <span style="font-size:10px;color:var(--text-dim)">Независимая дорожка</span>
     </div>
     <div id="pv-subs-list">${subs.map((sub, si) => `
@@ -2954,6 +2955,37 @@ export async function init() {
                 <button class="ive-align-btn${(sub.align||'center')==='right'?' active':''}" data-align="right" data-si="${si}">${ICONS.alignRight}</button>
             </div>
         </label>
+        <div class="ive-sub-karaoke" style="border-top:1px solid var(--border);padding-top:6px;margin-top:4px">
+            <label class="ive-label" style="flex-direction:row;align-items:center;gap:6px;font-size:12px;margin-bottom:4px">
+                <input type="checkbox" data-sf="karaokeEnable" data-si="${si}"${sub.karaokeEnable ? ' checked' : ''}>
+                <span style="font-weight:600">Подсветка слов</span>
+            </label>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+                <select class="ive-select" data-sf="karaokeMode" data-si="${si}" style="font-size:12px;padding:2px 4px">
+                    <option value="word"${(!sub.karaokeMode || sub.karaokeMode === 'word') ? ' selected' : ''}>Только слово</option>
+                    <option value="cumulative"${sub.karaokeMode === 'cumulative' ? ' selected' : ''}>Накопительно</option>
+                </select>
+                <input class="ive-input" type="color" data-sf="karaokeColor" data-si="${si}" value="${sub.karaokeColor || '#ffdd00'}" style="width:32px;height:28px;padding:2px">
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 8px">
+                <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer" title="Текущее слово печатается по буквам">
+                    <input type="checkbox" data-sf="karaokeTypewriterWord" data-si="${si}"${sub.karaokeTypewriterWord ? ' checked' : ''}>
+                    <span>По буквам</span>
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer" title="Подсветка фоном как маркер">
+                    <input type="checkbox" data-sf="karaokeHighlight" data-si="${si}"${sub.karaokeHighlight ? ' checked' : ''}>
+                    <span>Фон-маркер</span>
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer" title="Показывать только текущее слово">
+                    <input type="checkbox" data-sf="karaokeShowOnly" data-si="${si}"${sub.karaokeShowOnly ? ' checked' : ''}>
+                    <span>Только слово</span>
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer" title="Зум текущего слова">
+                    <input type="checkbox" data-sf="karaokeZoomWord" data-si="${si}"${sub.karaokeZoomWord ? ' checked' : ''}>
+                    <span>Зум слова</span>
+                </label>
+            </div>
+        </div>
         <details class="ive-sub-extra">
             <summary>Дополнительно</summary>
             <div class="ive-row2">
@@ -2970,22 +3002,9 @@ export async function init() {
             <div class="ive-row2">
                 <label class="ive-label">Радиус фона<input class="ive-input" type="number" data-sf="bgRadius" data-si="${si}" min="0" max="50" value="${sub.bgRadius ?? 4}"></label>
             </div>
-            <div class="ive-sub-karaoke">
-                <label class="ive-label" style="flex-direction:row;align-items:center;gap:6px;font-size:12px">
-                    <input type="checkbox" data-sf="karaokeEnable" data-si="${si}"${sub.karaokeEnable ? ' checked' : ''}>
-                    <span>Подсветка слов</span>
-                </label>
-                <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:2px">
-                    <select class="ive-select" data-sf="karaokeMode" data-si="${si}" style="font-size:12px;padding:2px 4px">
-                        <option value="word"${(!sub.karaokeMode || sub.karaokeMode === 'word') ? ' selected' : ''}>Только слово</option>
-                        <option value="cumulative"${sub.karaokeMode === 'cumulative' ? ' selected' : ''}>Накопительно</option>
-                    </select>
-                    <input class="ive-input" type="color" data-sf="karaokeColor" data-si="${si}" value="${sub.karaokeColor || '#ffdd00'}">
-                </div>
-            </div>
             <label class="ive-label ive-sub-above-row" style="flex-direction:row;align-items:center;gap:6px;font-size:12px;margin-top:6px">
                 <input type="checkbox" data-sf="aboveEffects" data-si="${si}"${sub.aboveEffects ? ' checked' : ''}>
-                <span title="Субтитр отображается поверх фильтров и эффектов изображения">☑ Поверх эффектов (Always On Top)</span>
+                <span title="Субтитр отображается поверх фильтров и эффектов изображения">☑ Поверх эффектов</span>
             </label>
         </details>
         </div>
@@ -3014,6 +3033,7 @@ export async function init() {
                               'bgColor','bgOpacity','bgPadX','bgPadY','bgRadius',
                               'animation','animDuration','align','lineHeight',
                               'karaokeEnable','karaokeColor','karaokeMode',
+                              'karaokeTypewriterWord','karaokeHighlight','karaokeShowOnly','karaokeZoomWord',
                               'x','y','rotation','w','h','aboveEffects'];
                 S.subtitles.forEach((sub, si) => {
                     if (si === srcIdx) return;
@@ -3025,6 +3045,35 @@ export async function init() {
             });
         });
 
+        $('pv-save-srt').addEventListener('click', async () => {
+            const validSubs = S.subtitles.filter(s => s.text && s.text.trim());
+            if (!validSubs.length) { toast('Нет субтитров для сохранения', 'warn'); return; }
+            const name = prompt('Имя файла SRT:', 'subtitles');
+            if (!name || !name.trim()) return;
+            const toSRTTime = s => {
+                const ms = Math.max(0, Math.round(s * 1000));
+                const h  = Math.floor(ms / 3600000);
+                const m  = Math.floor((ms % 3600000) / 60000);
+                const sc = Math.floor((ms % 60000) / 1000);
+                const cs = ms % 1000;
+                return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sc).padStart(2,'0')},${String(cs).padStart(3,'0')}`;
+            };
+            const content = validSubs
+                .slice().sort((a, b) => (a.start ?? 0) - (b.start ?? 0))
+                .map((s, i) => `${i + 1}\n${toSRTTime(s.start ?? 0)} --> ${toSRTTime(s.end ?? 3)}\n${s.text.trim()}`)
+                .join('\n\n');
+            try {
+                const r = await fetch('/api/subtitles', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name.trim(), content }),
+                });
+                const d = await r.json();
+                if (!r.ok) { toast(d.detail || 'Ошибка', 'err'); return; }
+                toast(d.status || 'SRT сохранён', 'ok');
+            } catch (e) { toast(e.message, 'err'); }
+        });
+
         $('pv-add-sub').addEventListener('click', () => {
             const t = S.currentTime;
             S.subtitles.push({ id: uid(), text: '', start: Math.round(t * 10) / 10, end: Math.round((t + 3) * 10) / 10,
@@ -3034,6 +3083,7 @@ export async function init() {
                 align: 'center', bgColor: '#000000', bgOpacity: 0, bgPadX: 12, bgPadY: 6, bgRadius: 4,
                 animation: 'none', animDuration: 0.6, rotation: 0,
                 lineHeight: 1.35, karaokeEnable: false, karaokeColor: '#ffdd00', karaokeMode: 'word',
+                karaokeTypewriterWord: false, karaokeHighlight: false, karaokeShowOnly: false, karaokeZoomWord: false,
                 aboveEffects: false });
             _pushHistory();
             S.selSubIdx = S.subtitles.length - 1;
