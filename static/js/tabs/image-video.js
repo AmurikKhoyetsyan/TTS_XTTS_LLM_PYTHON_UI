@@ -1098,6 +1098,19 @@ export async function init() {
     await loadTemplatesList();
     renderAll();
 
+    // ── Project / Template search ─────────────────────────────────────────────
+    function _applyProjSearch() {
+        const q = ($('ive-proj-search')?.value || '').trim().toLowerCase();
+        [$('ive-projects-list'), $('ive-templates-list')].forEach(listEl => {
+            if (!listEl) return;
+            listEl.querySelectorAll('.ive-proj-row').forEach(row => {
+                const name = (row.querySelector('.ive-proj-name')?.textContent || '').toLowerCase();
+                row.style.display = (!q || name.includes(q)) ? '' : 'none';
+            });
+        });
+    }
+    $('ive-proj-search')?.addEventListener('input', _applyProjSearch);
+
     // ── Track drag & drop reordering ──────────────────────────────────────────
     (function _initTrackDrag() {
         const TRACK_KEYS = ['video', 'audio', 'subtitle', 'pip'];
@@ -2672,17 +2685,35 @@ export async function init() {
         if (sub.karaokeEnable && sub.end > sub.start) {
             const karaokeColor = sub.karaokeColor || '#ffdd00';
             const normalColor  = sub.color || '#ffffff';
-            const wordArr  = sub.text.split(/\s+/).filter(Boolean);
-            const wordIdx  = Math.min(wordArr.length - 1, Math.floor(wordArr.length * elapsed / subDur));
-            const kmode    = sub.karaokeMode || 'word';
-            const tokens   = sub.text.split(/(\s+)/);
+            const kmode        = sub.karaokeMode || 'word';
+            const wordArr      = sub.text.split(/\s+/).filter(Boolean);
+            const n            = Math.max(1, wordArr.length);
+            const wordDurSec   = subDur / n;
+            const wordIdx      = Math.min(n - 1, Math.floor(n * elapsed / subDur));
+            const wordElapsed  = Math.max(0, elapsed - wordIdx * wordDurSec);
+            const tokens       = sub.text.split(/(\s+)/);
             let wi = 0;
             textEl.innerHTML = tokens.map(tok => {
-                if (/^\s+$/.test(tok)) return tok;
-                const idx = wi++;
-                const color = kmode === 'cumulative' ? (idx <= wordIdx ? karaokeColor : normalColor)
-                                                     : (idx === wordIdx ? karaokeColor : normalColor);
-                return `<span style="color:${color}">${eh(tok)}</span>`;
+                if (/^\s+$/.test(tok)) {
+                    return sub.karaokeShowOnly ? `<span style="opacity:0">${tok}</span>` : tok;
+                }
+                const idx      = wi++;
+                const isActive = idx === wordIdx;
+                const isBefore = idx <= wordIdx;
+                const isLit    = kmode === 'cumulative' ? isBefore : isActive;
+                if (sub.karaokeShowOnly && !isActive) return `<span style="opacity:0">${eh(tok)}</span>`;
+                const styles = [];
+                if (!sub.karaokeHighlight) styles.push(`color:${isLit ? karaokeColor : normalColor}`);
+                else styles.push(`color:${normalColor}`);
+                if (sub.karaokeHighlight && isLit) { styles.push(`background:${karaokeColor}`); styles.push('padding:0 3px'); styles.push('border-radius:3px'); }
+                if (sub.karaokeZoomWord && isActive) { styles.push('display:inline-block'); styles.push('font-size:1.4em'); styles.push('line-height:1'); styles.push('vertical-align:middle'); styles.push('font-weight:bold'); }
+                let content = eh(tok);
+                if (sub.karaokeTypewriterWord && isActive && wordDurSec > 0) {
+                    const charsShow = Math.max(1, Math.ceil(tok.length * Math.min(1, wordElapsed / wordDurSec)));
+                    content = eh(tok.slice(0, charsShow));
+                }
+                const styleStr = styles.join(';');
+                return styleStr ? `<span style="${styleStr}">${content}</span>` : content;
             }).join('');
         } else if (animType === 'typewriter') {
             // Character-by-character reveal — matches ASS export exactly.
@@ -4737,6 +4768,7 @@ export async function init() {
                 </div>
             </div>`).join('');
         } catch { listEl.innerHTML = '<div class="ive-empty">Ошибка</div>'; }
+        _applyProjSearch();
     }
 
     // ── Template Apply ────────────────────────────────────────────────────────
@@ -5262,6 +5294,7 @@ export async function init() {
                 </div>
             </div>`).join('');
         } catch { if (listEl) listEl.innerHTML = '<div class="ive-empty">Ошибка</div>'; }
+        _applyProjSearch();
     }
 
     $('ive-projects-list').addEventListener('click', async e => {
