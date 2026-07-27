@@ -106,8 +106,13 @@ data: {"status": "❌ Ошибка: ..."}
 - `outline`, `outline_color`, `shadow`, `shadow_color` — text decoration
 - `bg_color`, `bg_opacity` — subtitle background box
 - `position_x`, `position_y` — subtitle position (%)
-- `karaoke` — `true` to enable word-highlight animation
-- `karaoke_color` — highlight colour
+- `karaoke_enabled` — `true` to enable word-highlight animation
+- `karaoke_color` — highlight colour (hex, e.g. `ffdd00`)
+- `karaoke_mode` — `word` (current word only) / `cumulative` (all words up to current)
+- `karaoke_typewriter` — `true` to type out the current word letter-by-letter
+- `karaoke_highlight` — `true` for a coloured background rectangle behind the active word
+- `karaoke_showonly` — `true` to hide all words except the current one (preserves layout)
+- `karaoke_zoom` — `true` to enlarge the active word to 150%
 
 ---
 
@@ -306,12 +311,17 @@ data: {"status": "❌ Ошибка: ..."}
   "animDuration": 0.6,
   "karaokeEnable": true,
   "karaokeColor": "#ffdd00",
-  "karaokeMode": "word"
+  "karaokeMode": "word",
+  "karaokeTypewriter": false,
+  "karaokeHighlight": false,
+  "karaokeShowOnly": false,
+  "karaokeZoom": false
 }
 ```
 
 `animation` options: `""` / `"fade-in"` / `"fade-out"` / `"slide-up"` / `"slide-down"` / `"typewriter"` / `"zoom-in"`.  
-`karaokeMode`: `"word"` (word-by-word) / `"cumulative"` (highlights all words up to current).
+`karaokeMode`: `"word"` (word-by-word) / `"cumulative"` (highlights all words up to current).  
+All four karaoke effect flags are independent and can be combined freely with each other and with `animation`.
 
 ### PIP (picture-in-picture) object
 
