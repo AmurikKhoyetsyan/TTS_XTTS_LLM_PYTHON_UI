@@ -237,6 +237,7 @@
                     <button class="hist-type-btn" data-htype="vidtmpls">Видео шаблон</button>
                     <button class="hist-type-btn" data-htype="histlogs">Логи</button>
                 </div>
+                <input type="search" id="hist-search" placeholder="Поиск…" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:13px;width:160px;outline:none">
                 <button class="btn btn-ghost" id="hist-refresh">Обновить</button>
             </div>
 
@@ -676,6 +677,22 @@
                                         <option value="word">Только слово</option>
                                         <option value="cumulative">Накопительно</option>
                                     </select>
+                                </label>
+                                <label class="vsp-field vsp-inline">
+                                    <input type="checkbox" id="vid-karaoke-typewriter">
+                                    <span>По буквам</span>
+                                </label>
+                                <label class="vsp-field vsp-inline">
+                                    <input type="checkbox" id="vid-karaoke-highlight">
+                                    <span>Фон-маркер</span>
+                                </label>
+                                <label class="vsp-field vsp-inline">
+                                    <input type="checkbox" id="vid-karaoke-showonly">
+                                    <span>Только слово</span>
+                                </label>
+                                <label class="vsp-field vsp-inline">
+                                    <input type="checkbox" id="vid-karaoke-zoom">
+                                    <span>Зум слова</span>
                                 </label>
                                 <label class="vsp-field">
                                     <span>Межстрочный</span>

@@ -63,6 +63,7 @@ export async function init() {
                 </div>
             </div>`;
         }).join('');
+        _applySearch();
     }
 
     async function refreshAudio() {
@@ -156,6 +157,7 @@ export async function init() {
                     <button class="hist-btn danger" data-action="delete"   title="Удалить">${ICONS.trash}</button>
                 </div>
             </div>`).join('');
+        _applySearch();
     }
 
     async function refreshSRT() {
@@ -259,6 +261,7 @@ export async function init() {
                     <button class="hist-btn danger" data-action="delete"   title="Удалить">${ICONS.trash}</button>
                 </div>
             </div>`).join('');
+        _applySearch();
     }
 
     async function refreshVid() {
@@ -343,6 +346,7 @@ export async function init() {
                     <button class="hist-btn danger" data-action="delete" title="Удалить">${ICONS.trash}</button>
                 </div>
             </div>`).join('');
+        _applySearch();
     }
 
     async function refreshTemplates() {
@@ -418,6 +422,7 @@ export async function init() {
                     <button class="hist-btn danger" data-tact="delete" title="Удалить">${ICONS.trash}</button>
                 </div>
             </div>`).join('');
+        _applySearch();
     }
 
     async function refreshVidTmpls() {
@@ -572,6 +577,7 @@ export async function init() {
                 <button class="hist-btn danger" data-paction="delete" title="Удалить">${ICONS.trash}</button>
             </div>
         </div>`).join('');
+        _applySearch();
     }
 
     async function refreshProjects() {
@@ -642,6 +648,28 @@ export async function init() {
             } catch (e2) { toast(e2.message, 'err'); }
         }
     });
+
+    // ── Search ────────────────────────────────────────────────────────────────
+    const searchEl = document.getElementById('hist-search');
+
+    function _applySearch() {
+        const q = (searchEl?.value || '').trim().toLowerCase();
+        const activeSection = document.querySelector('.hist-section:not([hidden])');
+        if (!activeSection) return;
+        activeSection.querySelectorAll('.hist-list').forEach(list => {
+            list.querySelectorAll('.hist-row').forEach(row => {
+                const name = (row.querySelector('.hist-name')?.textContent || '').toLowerCase();
+                row.style.display = (!q || name.includes(q)) ? '' : 'none';
+            });
+        });
+    }
+
+    searchEl?.addEventListener('input', _applySearch);
+
+    // re-apply search whenever section switches so new content is filtered
+    typeBtns.forEach(btn => btn.addEventListener('click', () => {
+        if (searchEl?.value) setTimeout(_applySearch, 50);
+    }));
 
     // ── Refresh button (обновляет активную секцию) ────────────────────────────
     refreshBtn.addEventListener('click', () => {
