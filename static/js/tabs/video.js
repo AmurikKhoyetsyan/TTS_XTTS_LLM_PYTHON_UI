@@ -49,9 +49,13 @@ export async function init() {
     const shadowSizeN    = document.getElementById('vid-shadow-size-n');
     const shadowColorEl  = document.getElementById('vid-shadow-color');
 
-    const karaokeColorEl = document.getElementById('vid-karaoke-color');
-    const karaokeEnEl    = document.getElementById('vid-karaoke-enable');
-    const karaokeModeEl  = document.getElementById('vid-karaoke-mode');
+    const karaokeColorEl      = document.getElementById('vid-karaoke-color');
+    const karaokeEnEl         = document.getElementById('vid-karaoke-enable');
+    const karaokeModeEl       = document.getElementById('vid-karaoke-mode');
+    const karaokeTypewriterEl = document.getElementById('vid-karaoke-typewriter');
+    const karaokeHighlightEl  = document.getElementById('vid-karaoke-highlight');
+    const karaokeShowOnlyEl   = document.getElementById('vid-karaoke-showonly');
+    const karaokeZoomEl       = document.getElementById('vid-karaoke-zoom');
     const lineHeightEl   = document.getElementById('vid-line-height');
     const maxWidthEl     = document.getElementById('vid-max-width');
     const marginVEl      = document.getElementById('vid-margin-v');
@@ -517,9 +521,13 @@ export async function init() {
         fd.append('pos_x_px',      posXpx !== null ? String(posXpx) : '');
         fd.append('pos_y_px',      posYpx !== null ? String(posYpx) : '');
         fd.append('preview_width', String(Math.round(vidInner.offsetWidth)));
-        fd.append('karaoke_enabled', String(karaokeEnEl ? karaokeEnEl.checked : false));
-        fd.append('karaoke_color',   karaokeColorEl ? karaokeColorEl.value.replace('#', '') : 'ffdd00');
-        fd.append('karaoke_mode',    karaokeModeEl ? karaokeModeEl.value : 'word');
+        fd.append('karaoke_enabled',    String(karaokeEnEl ? karaokeEnEl.checked : false));
+        fd.append('karaoke_color',      karaokeColorEl ? karaokeColorEl.value.replace('#', '') : 'ffdd00');
+        fd.append('karaoke_mode',       karaokeModeEl ? karaokeModeEl.value : 'word');
+        fd.append('karaoke_typewriter', String(karaokeTypewriterEl ? karaokeTypewriterEl.checked : false));
+        fd.append('karaoke_highlight',  String(karaokeHighlightEl  ? karaokeHighlightEl.checked  : false));
+        fd.append('karaoke_showonly',   String(karaokeShowOnlyEl   ? karaokeShowOnlyEl.checked   : false));
+        fd.append('karaoke_zoom',       String(karaokeZoomEl       ? karaokeZoomEl.checked       : false));
 
         // Per-subtitle animation data (index → animation type + duration)
         if (currentSubs && currentSubs.length > 0) {
@@ -857,25 +865,59 @@ export async function init() {
 
         if (!sub) { overlay.innerHTML = ''; applySubStyle(); return; }
 
-        const karaokeOn    = karaokeEnEl && karaokeEnEl.checked;
-        const karaokeColor = karaokeColorEl ? karaokeColorEl.value : '#ffdd00';
-        const karaokeMode  = karaokeModeEl ? karaokeModeEl.value : 'word';
+        const karaokeOn        = karaokeEnEl && karaokeEnEl.checked;
+        const karaokeColor     = karaokeColorEl ? karaokeColorEl.value : '#ffdd00';
+        const karaokeMode      = karaokeModeEl ? karaokeModeEl.value : 'word';
+        const karaokeTypewriter = karaokeTypewriterEl ? karaokeTypewriterEl.checked : false;
+        const karaokeHighlight  = karaokeHighlightEl  ? karaokeHighlightEl.checked  : false;
+        const karaokeShowOnly   = karaokeShowOnlyEl   ? karaokeShowOnlyEl.checked   : false;
+        const karaokeZoom       = karaokeZoomEl       ? karaokeZoomEl.checked       : false;
 
         if (karaokeOn && sub.end > sub.start) {
-            const wordArr  = sub.text.split(/\s+/).filter(Boolean);
-            const elapsed  = vidPreview.currentTime - sub.start;
-            const subDur   = sub.end - sub.start;
-            const wordIdx  = Math.min(wordArr.length - 1, Math.floor(wordArr.length * elapsed / subDur));
-            const tokens   = sub.text.split(/(\s+)/);
+            const wordArr    = sub.text.split(/\s+/).filter(Boolean);
+            const n          = Math.max(1, wordArr.length);
+            const elapsed    = vidPreview.currentTime - sub.start;
+            const subDur     = sub.end - sub.start;
+            const wordDurSec = subDur / n;
+            const wordIdx    = Math.min(n - 1, Math.floor(n * elapsed / subDur));
+            const wordElapsed = Math.max(0, elapsed - wordIdx * wordDurSec);
+            const normalColor = sub.color || '#ffffff';
+            const tokens     = sub.text.split(/(\s+)/);
             let wi = 0;
             const html = tokens.map(tok => {
-                if (/^\s+$/.test(tok)) return tok;
-                const idx = wi++;
-                const esc = escHtml(tok);
-                const highlight = karaokeMode === 'cumulative' ? idx <= wordIdx : idx === wordIdx;
-                return highlight
-                    ? `<span style="color:${karaokeColor}">${esc}</span>`
-                    : esc;
+                if (/^\s+$/.test(tok)) {
+                    return karaokeShowOnly ? `<span style="opacity:0">${tok}</span>` : tok;
+                }
+                const idx      = wi++;
+                const isActive = idx === wordIdx;
+                const isBefore = idx <= wordIdx;
+                const isLit    = karaokeMode === 'cumulative' ? isBefore : isActive;
+                if (karaokeShowOnly && !isActive) return `<span style="opacity:0">${escHtml(tok)}</span>`;
+                const styles = [];
+                if (!karaokeHighlight) {
+                    styles.push(`color:${isLit ? karaokeColor : normalColor}`);
+                } else {
+                    styles.push(`color:${normalColor}`);
+                }
+                if (karaokeHighlight && isLit) {
+                    styles.push(`background:${karaokeColor}`);
+                    styles.push('padding:0 3px');
+                    styles.push('border-radius:3px');
+                }
+                if (karaokeZoom && isActive) {
+                    styles.push('display:inline-block');
+                    styles.push('font-size:1.4em');
+                    styles.push('line-height:1');
+                    styles.push('vertical-align:middle');
+                    styles.push('font-weight:bold');
+                }
+                let content = escHtml(tok);
+                if (karaokeTypewriter && isActive && wordDurSec > 0) {
+                    const charsShow = Math.max(1, Math.ceil(tok.length * Math.min(1, wordElapsed / wordDurSec)));
+                    content = escHtml(tok.slice(0, charsShow));
+                }
+                const styleStr = styles.join(';');
+                return styleStr ? `<span style="${styleStr}">${content}</span>` : content;
             }).join('');
             overlay.innerHTML = html;
         } else {

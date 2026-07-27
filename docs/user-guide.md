@@ -84,7 +84,13 @@ Burns styled subtitles into a video file using FFmpeg.
 1. Upload a video (any format FFmpeg supports).
 2. Select an SRT file or paste SRT content.
 3. Adjust subtitle style: font, size, colour, bold/italic/underline, outline, shadow, background box, position.
-4. Optionally enable **Karaoke** — animated word-by-word colour highlight.
+4. Optionally enable **Подсветка** (Karaoke) — animated word-by-word colour highlight.
+   Additional karaoke effects (in the **Дополнительно** section):
+   - **По буквам** — current word types out letter-by-letter during its time slot
+   - **Фон-маркер** — coloured background box behind the active word (marker effect)
+   - **Только слово** — all other words are hidden while preserving their layout
+   - **Зум слова** — active word is displayed at 150% scale
+   All four effects can be combined with each other and with the colour highlight mode.
 5. Click **Записать субтитры** — progress streams in real time.
 6. Download or preview the result.
 
@@ -94,14 +100,17 @@ Burns styled subtitles into a video file using FFmpeg.
 
 ## Tab: История
 
-File browser with four sections (select in the top bar):
+File browser with seven sections (select in the top bar). Use the **Поиск…** input in the toolbar to filter the active section by name in real time.
 
 | Section | Contents |
 |---------|----------|
 | **Аудио** | Generated TTS audio files. Play, download, rename, delete. |
-| **Субтитры** | Saved SRT files. Open in editor, rename, delete. |
+| **Субтитры** | Saved SRT files. Preview, restore to editor, download, rename, delete. |
 | **Видео** | Processed videos. Preview, download, rename, delete. |
-| **Шаблоны** | Video subtitle style templates. Load, rename, delete. |
+| **Шаблоны** | Video subtitle style templates (from the Видео tab). Preview JSON, delete. |
+| **Проекты** | Image Video Editor projects. Open in editor, download as `.project`, rename, delete. |
+| **Видео шаблон** | Image Video Editor project templates. Edit, duplicate, rename, delete. |
+| **Логи** | Server log files. View, open in log editor, delete. |
 
 ---
 
@@ -173,6 +182,11 @@ Select a subtitle on the timeline or in the preview to open its properties:
 - Background colour + opacity
 - Animation: fade-in / fade-out / slide-up / slide-down / typewriter / zoom-in
 - **Karaoke** — enable word-by-word highlight; choose highlight colour and mode (word / cumulative)
+  - **По буквам** — current word types out letter-by-letter
+  - **Фон-маркер** — coloured background rectangle behind the active word
+  - **Только слово** — other words are invisible but hold their space (no layout shift)
+  - **Зум слова** — active word shown at 140% size
+- **💾 SRT** — export all subtitles to a `.srt` file saved in История → Субтитры
 
 ### PIP (Picture-in-Picture)
 
@@ -229,8 +243,8 @@ Progress streams in real time. The exported file appears in **История →
 ### Projects and Templates
 
 - **Сохранить** — saves the current project (JSON + all media packed into a `.project` archive).
-- **Загрузить** — open a saved project from the list.
-- **Сохранить как шаблон** — marks the project as a template; appears in the Templates section for future reuse.
+- **Загрузить** — open a saved project from the list. Use the **Поиск…** field above the list to filter projects by name.
+- **Сохранить как шаблон** — marks the project as a template; appears in the Templates section for future reuse. Use the **Поиск…** field above the templates list to filter by name.
 - **Обзор** — browse the file system for a `.project` file and load it.
 
 **Applying a template** — click **Применить шаблон** next to any template in the list. A modal opens with drag-and-drop zones:

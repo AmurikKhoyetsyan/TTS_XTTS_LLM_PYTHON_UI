@@ -158,13 +158,76 @@ def _write_ass(subs: list, path: str, width: int, height: int) -> None:
         except: ass_kc = "&H0000DDFF"
 
         if karaoke_on and raw_text.strip() and abs_end > abs_start:
-            _box(abs_start, abs_end)  # box spans full subtitle duration
+            _box(abs_start, abs_end)
+
+            k_typewriter = bool(sub.get("karaokeTypewriterWord", False))
+            k_highlight  = bool(sub.get("karaokeHighlight",      False))
+            k_showonly   = bool(sub.get("karaokeShowOnly",       False))
+            k_zoom       = bool(sub.get("karaokeZoomWord",       False))
+            # Increase border for highlight approximation
+            hl_bord = max(4, int(outline) + 4)
+
             words = [w for w in re.split(r'(?:\\N|\s)+', raw_text) if w]
             n = max(1, len(words))
             word_dur = (abs_end - abs_start) / n
             kmode = sub.get("karaokeMode", "word")
             abs_start_cs = int(round(abs_start * 100))
             abs_end_cs   = int(round(abs_end   * 100))
+            raw_tokens   = re.split(r'((?:\\N|\s)+)', raw_text)
+
+            def _build_stage_text(stage, partial_chars=None):
+                """Build the full dialogue text for one word stage.
+                partial_chars: if set, show only that many chars of the active word (typewriter).
+                """
+                wi, parts = 0, []
+                for tok in raw_tokens:
+                    if not tok:
+                        continue
+                    if re.fullmatch(r'(?:\\N|\s)+', tok):
+                        parts.append(tok)
+                        continue
+                    is_active = (wi == stage)
+                    is_before = (wi <= stage)
+
+                    if k_showonly and not is_active:
+                        # Invisible but width-preserving via alpha
+                        parts.append(f"{{\\1a&HFF&}}{tok}{{\\1a&H00&}}")
+                        wi += 1
+                        continue
+
+                    # Base text color
+                    if kmode == "cumulative":
+                        color = ass_kc if is_before else primary
+                    elif kmode == "word":
+                        color = ass_kc if is_active else primary
+                    else:
+                        color = primary
+
+                    tags = f"\\1c{color}"
+
+                    # Highlight: use karaoke color as thick outline to simulate a box
+                    if k_highlight:
+                        if is_active or (kmode == "cumulative" and is_before):
+                            tags += f"\\3c{ass_kc}\\bord{hl_bord}"
+                        else:
+                            tags += f"\\3c{ass_oc}\\bord{outline:.1f}"
+
+                    # Zoom: scale current word inline
+                    if k_zoom:
+                        tags += "\\fscx150\\fscy150" if is_active else "\\fscx100\\fscy100"
+
+                    display_tok = tok
+                    if partial_chars is not None and is_active:
+                        display_tok = tok[:partial_chars]
+
+                    parts.append(f"{{{tags}}}{display_tok}")
+                    wi += 1
+
+                # Reset style at end so nothing leaks into next tag
+                if k_highlight or k_zoom:
+                    parts.append(f"{{\\1c{primary}\\3c{ass_oc}\\bord{outline:.1f}\\fscx100\\fscy100}}")
+                return "".join(parts)
+
             for stage in range(n):
                 t0_cs = abs_start_cs + int(round(stage * word_dur * 100))
                 t1_cs = (abs_start_cs + int(round((stage + 1) * word_dur * 100))
@@ -175,24 +238,40 @@ def _write_ass(subs: list, path: str, width: int, height: int) -> None:
                 if t0_cs >= t1_cs:
                     continue
                 t0_k, t1_k = t0_cs / 100.0, t1_cs / 100.0
-                raw_tokens = re.split(r'((?:\\N|\s)+)', raw_text)
-                wi, ktext_parts = 0, []
-                for tok in raw_tokens:
-                    if not tok:
-                        continue
-                    if re.fullmatch(r'(?:\\N|\s)+', tok):
-                        ktext_parts.append(tok)
-                    else:
-                        if kmode == "cumulative":
-                            c = ass_kc if wi <= stage else primary
-                            ktext_parts.append(f"{{\\1c{c}}}{tok}")
-                        else:
-                            ktext_parts.append(
-                                f"{{\\1c{ass_kc}}}{tok}{{\\1c{primary}}}"
-                                if wi == stage else tok
-                            )
-                        wi += 1
-                _dl(text_layer, t0_k, t1_k, base, "".join(ktext_parts))
+                is_first = stage == 0
+                is_last  = stage == n - 1
+
+                # ── Animation extra tags (coexist with karaoke) ───────────────
+                extra = ""
+                stage_base = base
+                if anim == "fade-in":
+                    extra = f"\\fad({anim_ms},0)"
+                elif anim == "fade-out" and is_last:
+                    extra = f"\\fad(0,{anim_ms})"
+                elif anim in ("slide-up", "slide-down") and is_first:
+                    dy = 30 if anim == "slide-up" else -30
+                    stage_base = (style_tags +
+                                  f"\\an{an_code}\\move({text_px},{py+dy},{text_px},{py},0,{anim_ms}){rot_tag}")
+                    extra = f"\\fad({half_ms},{half_ms})"
+                elif anim == "zoom-in" and is_first:
+                    extra = f"\\fad({anim_ms},0)\\fscx5\\fscy5\\t(0,{anim_ms},\\fscx100\\fscy100)"
+
+                # ── Typewriter-per-word: generate one event per character ─────
+                if k_typewriter:
+                    cur_word = words[stage] if stage < len(words) else ""
+                    n_ch = max(1, len(cur_word))
+                    ch_span_cs = max(1, (t1_cs - t0_cs) // n_ch)
+                    for ci in range(n_ch):
+                        tc0 = t0_cs + ci * ch_span_cs
+                        tc1 = (t0_cs + (ci + 1) * ch_span_cs) if ci < n_ch - 1 else t1_cs
+                        tc1 = min(tc1, t1_cs)
+                        if tc0 >= tc1:
+                            continue
+                        _dl(text_layer, tc0/100.0, tc1/100.0,
+                            stage_base + extra,
+                            _build_stage_text(stage, partial_chars=ci + 1))
+                else:
+                    _dl(text_layer, t0_k, t1_k, stage_base + extra, _build_stage_text(stage))
 
         elif anim == "fade-in":
             fad = f"\\fad({anim_ms},0)"

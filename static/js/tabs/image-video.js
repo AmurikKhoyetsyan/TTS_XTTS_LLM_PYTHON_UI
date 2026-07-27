@@ -158,6 +158,7 @@ export async function init() {
     const labelsScroll  = $('ive-labels-scroll');
     const propsBody     = $('ive-props-body');
     const trimBtn       = $('ive-trim-btn');
+    const saveFrameBtn  = $('ive-save-frame-btn');
     // Transition preview elements
     const previewContentNext = $('ive-preview-content-next');
     const previewImgNext     = $('ive-preview-img-next');
@@ -1088,12 +1089,27 @@ export async function init() {
     fwdBtn.innerHTML        = ICONS.skipFwd;
     goEnd.innerHTML         = ICONS.tbGoEnd;
     trimBtn.innerHTML       = ICONS.scissors;
+    saveFrameBtn.innerHTML  = ICONS.camera;
 
     trimBtn.addEventListener('click', _splitAtPlayhead);
+    saveFrameBtn.addEventListener('click', _saveCurrentFrame);
 
     await loadProjectsList();
     await loadTemplatesList();
     renderAll();
+
+    // ── Project / Template search ─────────────────────────────────────────────
+    function _applyProjSearch() {
+        const q = ($('ive-proj-search')?.value || '').trim().toLowerCase();
+        [$('ive-projects-list'), $('ive-templates-list')].forEach(listEl => {
+            if (!listEl) return;
+            listEl.querySelectorAll('.ive-proj-row').forEach(row => {
+                const name = (row.querySelector('.ive-proj-name')?.textContent || '').toLowerCase();
+                row.style.display = (!q || name.includes(q)) ? '' : 'none';
+            });
+        });
+    }
+    $('ive-proj-search')?.addEventListener('input', _applyProjSearch);
 
     // ── Track drag & drop reordering ──────────────────────────────────────────
     (function _initTrackDrag() {
@@ -2669,17 +2685,35 @@ export async function init() {
         if (sub.karaokeEnable && sub.end > sub.start) {
             const karaokeColor = sub.karaokeColor || '#ffdd00';
             const normalColor  = sub.color || '#ffffff';
-            const wordArr  = sub.text.split(/\s+/).filter(Boolean);
-            const wordIdx  = Math.min(wordArr.length - 1, Math.floor(wordArr.length * elapsed / subDur));
-            const kmode    = sub.karaokeMode || 'word';
-            const tokens   = sub.text.split(/(\s+)/);
+            const kmode        = sub.karaokeMode || 'word';
+            const wordArr      = sub.text.split(/\s+/).filter(Boolean);
+            const n            = Math.max(1, wordArr.length);
+            const wordDurSec   = subDur / n;
+            const wordIdx      = Math.min(n - 1, Math.floor(n * elapsed / subDur));
+            const wordElapsed  = Math.max(0, elapsed - wordIdx * wordDurSec);
+            const tokens       = sub.text.split(/(\s+)/);
             let wi = 0;
             textEl.innerHTML = tokens.map(tok => {
-                if (/^\s+$/.test(tok)) return tok;
-                const idx = wi++;
-                const color = kmode === 'cumulative' ? (idx <= wordIdx ? karaokeColor : normalColor)
-                                                     : (idx === wordIdx ? karaokeColor : normalColor);
-                return `<span style="color:${color}">${eh(tok)}</span>`;
+                if (/^\s+$/.test(tok)) {
+                    return sub.karaokeShowOnly ? `<span style="opacity:0">${tok}</span>` : tok;
+                }
+                const idx      = wi++;
+                const isActive = idx === wordIdx;
+                const isBefore = idx <= wordIdx;
+                const isLit    = kmode === 'cumulative' ? isBefore : isActive;
+                if (sub.karaokeShowOnly && !isActive) return `<span style="opacity:0">${eh(tok)}</span>`;
+                const styles = [];
+                if (!sub.karaokeHighlight) styles.push(`color:${isLit ? karaokeColor : normalColor}`);
+                else styles.push(`color:${normalColor}`);
+                if (sub.karaokeHighlight && isLit) { styles.push(`background:${karaokeColor}`); styles.push('padding:0 3px'); styles.push('border-radius:3px'); }
+                if (sub.karaokeZoomWord && isActive) { styles.push('display:inline-block'); styles.push('font-size:1.4em'); styles.push('line-height:1'); styles.push('vertical-align:middle'); styles.push('font-weight:bold'); }
+                let content = eh(tok);
+                if (sub.karaokeTypewriterWord && isActive && wordDurSec > 0) {
+                    const charsShow = Math.max(1, Math.ceil(tok.length * Math.min(1, wordElapsed / wordDurSec)));
+                    content = eh(tok.slice(0, charsShow));
+                }
+                const styleStr = styles.join(';');
+                return styleStr ? `<span style="${styleStr}">${content}</span>` : content;
             }).join('');
         } else if (animType === 'typewriter') {
             // Character-by-character reveal — matches ASS export exactly.
@@ -2882,6 +2916,7 @@ export async function init() {
         propsBody.innerHTML = `
     <div class="ive-subs-header">
         <button class="btn btn-sm" id="pv-add-sub">+ Субтитр</button>
+        <button class="btn btn-sm" id="pv-save-srt" title="Сохранить субтитры как SRT">💾 SRT</button>
         <span style="font-size:10px;color:var(--text-dim)">Независимая дорожка</span>
     </div>
     <div id="pv-subs-list">${subs.map((sub, si) => `
@@ -2951,6 +2986,37 @@ export async function init() {
                 <button class="ive-align-btn${(sub.align||'center')==='right'?' active':''}" data-align="right" data-si="${si}">${ICONS.alignRight}</button>
             </div>
         </label>
+        <div class="ive-sub-karaoke" style="border-top:1px solid var(--border);padding-top:6px;margin-top:4px">
+            <label class="ive-label" style="flex-direction:row;align-items:center;gap:6px;font-size:12px;margin-bottom:4px">
+                <input type="checkbox" data-sf="karaokeEnable" data-si="${si}"${sub.karaokeEnable ? ' checked' : ''}>
+                <span style="font-weight:600">Подсветка слов</span>
+            </label>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+                <select class="ive-select" data-sf="karaokeMode" data-si="${si}" style="font-size:12px;padding:2px 4px">
+                    <option value="word"${(!sub.karaokeMode || sub.karaokeMode === 'word') ? ' selected' : ''}>Только слово</option>
+                    <option value="cumulative"${sub.karaokeMode === 'cumulative' ? ' selected' : ''}>Накопительно</option>
+                </select>
+                <input class="ive-input" type="color" data-sf="karaokeColor" data-si="${si}" value="${sub.karaokeColor || '#ffdd00'}" style="width:32px;height:28px;padding:2px">
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 8px">
+                <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer" title="Текущее слово печатается по буквам">
+                    <input type="checkbox" data-sf="karaokeTypewriterWord" data-si="${si}"${sub.karaokeTypewriterWord ? ' checked' : ''}>
+                    <span>По буквам</span>
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer" title="Подсветка фоном как маркер">
+                    <input type="checkbox" data-sf="karaokeHighlight" data-si="${si}"${sub.karaokeHighlight ? ' checked' : ''}>
+                    <span>Фон-маркер</span>
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer" title="Показывать только текущее слово">
+                    <input type="checkbox" data-sf="karaokeShowOnly" data-si="${si}"${sub.karaokeShowOnly ? ' checked' : ''}>
+                    <span>Только слово</span>
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer" title="Зум текущего слова">
+                    <input type="checkbox" data-sf="karaokeZoomWord" data-si="${si}"${sub.karaokeZoomWord ? ' checked' : ''}>
+                    <span>Зум слова</span>
+                </label>
+            </div>
+        </div>
         <details class="ive-sub-extra">
             <summary>Дополнительно</summary>
             <div class="ive-row2">
@@ -2967,22 +3033,9 @@ export async function init() {
             <div class="ive-row2">
                 <label class="ive-label">Радиус фона<input class="ive-input" type="number" data-sf="bgRadius" data-si="${si}" min="0" max="50" value="${sub.bgRadius ?? 4}"></label>
             </div>
-            <div class="ive-sub-karaoke">
-                <label class="ive-label" style="flex-direction:row;align-items:center;gap:6px;font-size:12px">
-                    <input type="checkbox" data-sf="karaokeEnable" data-si="${si}"${sub.karaokeEnable ? ' checked' : ''}>
-                    <span>Подсветка слов</span>
-                </label>
-                <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:2px">
-                    <select class="ive-select" data-sf="karaokeMode" data-si="${si}" style="font-size:12px;padding:2px 4px">
-                        <option value="word"${(!sub.karaokeMode || sub.karaokeMode === 'word') ? ' selected' : ''}>Только слово</option>
-                        <option value="cumulative"${sub.karaokeMode === 'cumulative' ? ' selected' : ''}>Накопительно</option>
-                    </select>
-                    <input class="ive-input" type="color" data-sf="karaokeColor" data-si="${si}" value="${sub.karaokeColor || '#ffdd00'}">
-                </div>
-            </div>
             <label class="ive-label ive-sub-above-row" style="flex-direction:row;align-items:center;gap:6px;font-size:12px;margin-top:6px">
                 <input type="checkbox" data-sf="aboveEffects" data-si="${si}"${sub.aboveEffects ? ' checked' : ''}>
-                <span title="Субтитр отображается поверх фильтров и эффектов изображения">☑ Поверх эффектов (Always On Top)</span>
+                <span title="Субтитр отображается поверх фильтров и эффектов изображения">☑ Поверх эффектов</span>
             </label>
         </details>
         </div>
@@ -3011,6 +3064,7 @@ export async function init() {
                               'bgColor','bgOpacity','bgPadX','bgPadY','bgRadius',
                               'animation','animDuration','align','lineHeight',
                               'karaokeEnable','karaokeColor','karaokeMode',
+                              'karaokeTypewriterWord','karaokeHighlight','karaokeShowOnly','karaokeZoomWord',
                               'x','y','rotation','w','h','aboveEffects'];
                 S.subtitles.forEach((sub, si) => {
                     if (si === srcIdx) return;
@@ -3022,6 +3076,35 @@ export async function init() {
             });
         });
 
+        $('pv-save-srt').addEventListener('click', async () => {
+            const validSubs = S.subtitles.filter(s => s.text && s.text.trim());
+            if (!validSubs.length) { toast('Нет субтитров для сохранения', 'warn'); return; }
+            const name = prompt('Имя файла SRT:', 'subtitles');
+            if (!name || !name.trim()) return;
+            const toSRTTime = s => {
+                const ms = Math.max(0, Math.round(s * 1000));
+                const h  = Math.floor(ms / 3600000);
+                const m  = Math.floor((ms % 3600000) / 60000);
+                const sc = Math.floor((ms % 60000) / 1000);
+                const cs = ms % 1000;
+                return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sc).padStart(2,'0')},${String(cs).padStart(3,'0')}`;
+            };
+            const content = validSubs
+                .slice().sort((a, b) => (a.start ?? 0) - (b.start ?? 0))
+                .map((s, i) => `${i + 1}\n${toSRTTime(s.start ?? 0)} --> ${toSRTTime(s.end ?? 3)}\n${s.text.trim()}`)
+                .join('\n\n');
+            try {
+                const r = await fetch('/api/subtitles', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name.trim(), content }),
+                });
+                const d = await r.json();
+                if (!r.ok) { toast(d.detail || 'Ошибка', 'err'); return; }
+                toast(d.status || 'SRT сохранён', 'ok');
+            } catch (e) { toast(e.message, 'err'); }
+        });
+
         $('pv-add-sub').addEventListener('click', () => {
             const t = S.currentTime;
             S.subtitles.push({ id: uid(), text: '', start: Math.round(t * 10) / 10, end: Math.round((t + 3) * 10) / 10,
@@ -3031,6 +3114,7 @@ export async function init() {
                 align: 'center', bgColor: '#000000', bgOpacity: 0, bgPadX: 12, bgPadY: 6, bgRadius: 4,
                 animation: 'none', animDuration: 0.6, rotation: 0,
                 lineHeight: 1.35, karaokeEnable: false, karaokeColor: '#ffdd00', karaokeMode: 'word',
+                karaokeTypewriterWord: false, karaokeHighlight: false, karaokeShowOnly: false, karaokeZoomWord: false,
                 aboveEffects: false });
             _pushHistory();
             S.selSubIdx = S.subtitles.length - 1;
@@ -4684,6 +4768,7 @@ export async function init() {
                 </div>
             </div>`).join('');
         } catch { listEl.innerHTML = '<div class="ive-empty">Ошибка</div>'; }
+        _applyProjSearch();
     }
 
     // ── Template Apply ────────────────────────────────────────────────────────
@@ -5209,6 +5294,7 @@ export async function init() {
                 </div>
             </div>`).join('');
         } catch { if (listEl) listEl.innerHTML = '<div class="ive-empty">Ошибка</div>'; }
+        _applyProjSearch();
     }
 
     $('ive-projects-list').addEventListener('click', async e => {
@@ -5870,5 +5956,156 @@ export async function init() {
         if (!s) return;
         expModal.applySettings(s);
         _updatePreviewSize();
+    }
+
+    async function _saveCurrentFrame() {
+        const info = clipAtTime(S.currentTime);
+        if (!info || !info.clip) { toast('Нет кадра для сохранения', 'warn'); return; }
+
+        const clip  = info.inTransition ? info.outClip : info.clip;
+        const local = info.inTransition ? clip.duration : info.local;
+        const { w: resW, h: resH } = expModal.getResolution();
+        const cw = resW || 1920, ch = resH || 1080;
+
+        const canvas = document.createElement('canvas');
+        canvas.width = cw; canvas.height = ch;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#000'; ctx.fillRect(0, 0, cw, ch);
+
+        const cssFilter = buildCSSFilter(clip.effects || []);
+
+        try {
+            if (clip.type === 'image') {
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = clip.fileUrl; if (img.complete && img.naturalWidth) res(); });
+
+                const imgAR = img.naturalWidth / img.naturalHeight;
+                const cAR   = cw / ch;
+                let dw = imgAR > cAR ? cw : ch * imgAR;
+                let dh = imgAR > cAR ? cw / imgAR : ch;
+                const dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+
+                const sc = (clip.imgScale || 100) / 100;
+                const tx = (clip.imgOffsetX || 0) / 100 * cw;
+                const ty = (clip.imgOffsetY || 0) / 100 * ch;
+
+                if (cssFilter) ctx.filter = cssFilter;
+                ctx.save();
+                const crop = clip.crop;
+                if (crop && (crop.x > 0 || crop.y > 0 || crop.w < 100 || crop.h < 100)) {
+                    ctx.beginPath();
+                    ctx.rect(crop.x / 100 * cw, crop.y / 100 * ch, crop.w / 100 * cw, crop.h / 100 * ch);
+                    ctx.clip();
+                }
+                ctx.translate(cw / 2, ch / 2);
+                ctx.scale(sc, sc);
+                ctx.translate(tx, ty);
+                ctx.drawImage(img, dx - cw / 2, dy - ch / 2, dw, dh);
+                ctx.restore();
+                ctx.filter = 'none';
+            } else {
+                // Video: capture current frame from the live preview element
+                const vW = previewVideo.videoWidth || cw;
+                const vH = previewVideo.videoHeight || ch;
+                const vAR = vW / vH, cAR = cw / ch;
+                let dw = vAR > cAR ? cw : ch * vAR;
+                let dh = vAR > cAR ? cw / vAR : ch;
+                if (cssFilter) ctx.filter = cssFilter;
+                ctx.drawImage(previewVideo, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+                ctx.filter = 'none';
+            }
+
+            // Subtitle overlay
+            const _t = S.currentTime;
+            const activeSub = S.subtitles.find(s => _t >= (s.start || 0) && _t <= (s.end ?? 3))
+                || (clip.subtitles || []).find(s => local >= (s.start || 0) && local <= (s.end ?? clip.duration));
+            if (activeSub?.text) {
+                // sub.x/y are % of the crop viewport; fontSize/outline are at full resH scale
+                let subOx = 0, subOy = 0, subVw = cw, subVh = ch, subSc = 1;
+                if (S.canvasCrop) {
+                    const c  = S.canvasCrop;
+                    const sx = cw / (c.resW || cw);
+                    const sy = ch / (c.resH || ch);
+                    subOx  = c.x * sx;  subOy  = c.y * sy;
+                    subVw  = c.w * sx;  subVh  = c.h * sy;
+                    subSc  = subVh / ch;
+                }
+                _drawSubtitleOnCanvas(ctx, activeSub, subOx, subOy, subVw, subVh, subSc);
+            }
+
+            // Apply canvas crop if set
+            let outCanvas = canvas;
+            if (S.canvasCrop) {
+                const c  = S.canvasCrop;
+                const sx = c.resW ? cw / c.resW : 1;
+                const sy = c.resH ? ch / c.resH : 1;
+                const rx = Math.round(c.x * sx), ry = Math.round(c.y * sy);
+                const rw = Math.round(c.w * sx),  rh = Math.round(c.h * sy);
+                outCanvas = document.createElement('canvas');
+                outCanvas.width = rw; outCanvas.height = rh;
+                outCanvas.getContext('2d').drawImage(canvas, rx, ry, rw, rh, 0, 0, rw, rh);
+            }
+
+            outCanvas.toBlob(blob => {
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `frame_${S.currentTime.toFixed(2).replace('.', 's')}.png`;
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+            }, 'image/png');
+            toast('Кадр сохранён', 'ok');
+        } catch (e) {
+            console.error(e);
+            toast('Ошибка сохранения кадра', 'err');
+        }
+    }
+
+    // originX/Y = top-left of crop in full-canvas pixels (0,0 if no crop)
+    // viewW/H   = crop viewport size in full-canvas pixels (=cw/ch if no crop)
+    // sc        = viewH / fullCanvasH — scales fontSize, outline, padding to match the crop viewport
+    function _drawSubtitleOnCanvas(ctx, sub, originX, originY, viewW, viewH, sc) {
+        const fontSize   = (sub.fontSize || 40) * sc;
+        const fontFamily = sub.fontFamily || 'Arial';
+        const fw = sub.bold   ? 'bold'   : 'normal';
+        const fi = sub.italic ? 'italic' : 'normal';
+        ctx.font         = `${fi} ${fw} ${fontSize}px "${fontFamily}", sans-serif`;
+        ctx.textAlign    = sub.align || 'center';
+        ctx.textBaseline = 'middle';
+
+        const x = originX + (sub.x ?? 50) / 100 * viewW;
+        const y = originY + (sub.y ?? 88) / 100 * viewH;
+        const lines  = sub.text.split('\n');
+        const lineH  = fontSize * (sub.lineHeight || 1.35);
+        const startY = y - (lines.length - 1) * lineH / 2;
+
+        // Background box
+        const bgOp = sub.bgOpacity ?? 0;
+        if (bgOp > 0) {
+            const padX = (sub.bgPadX ?? 12) * sc;
+            const padY = (sub.bgPadY ?? 6)  * sc;
+            const rx   = (sub.bgRadius ?? 4) * sc;
+            const maxW = Math.max(...lines.map(l => ctx.measureText(l).width));
+            const bx = x - maxW / 2 - padX, by = startY - lineH / 2 - padY;
+            const bw = maxW + padX * 2,      bh = lines.length * lineH + padY * 2;
+            ctx.fillStyle = hexToRgba(sub.bgColor || '#000000', bgOp);
+            ctx.beginPath();
+            if (ctx.roundRect) ctx.roundRect(bx, by, bw, bh, rx);
+            else ctx.rect(bx, by, bw, bh);
+            ctx.fill();
+        }
+
+        // Outline stroke
+        const outline = (sub.outline ?? 2) * sc;
+        if (outline > 0) {
+            ctx.strokeStyle = sub.outlineColor || '#000000';
+            ctx.lineWidth   = outline * 2;
+            ctx.lineJoin    = 'round';
+            for (let i = 0; i < lines.length; i++) ctx.strokeText(lines[i], x, startY + i * lineH);
+        }
+
+        // Fill text
+        ctx.fillStyle = sub.color || '#ffffff';
+        for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], x, startY + i * lineH);
     }
 }

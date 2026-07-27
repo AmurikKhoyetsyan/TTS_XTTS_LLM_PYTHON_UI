@@ -273,9 +273,13 @@ def _srt_to_ass(srt_content: str, style_dict: dict,
         base_margin   = max(0, int((frame_w - text_wrap) / 2))
         margin_l = margin_r = base_margin + int(extra_h_margin)
 
-    karaoke_on   = bool(sd.get("KaraokeEnabled", False))
-    karaoke_mode = sd.get("KaraokeMode", "word")
-    karaoke_color_ass = _hex_to_ass(str(sd.get("KaraokeColor", "ffdd00")))
+    karaoke_on         = bool(sd.get("KaraokeEnabled", False))
+    karaoke_mode       = sd.get("KaraokeMode", "word")
+    karaoke_color_ass  = _hex_to_ass(str(sd.get("KaraokeColor", "ffdd00")))
+    k_typewriter       = bool(sd.get("KaraokeTypewriter", False))
+    k_highlight        = bool(sd.get("KaraokeHighlight",  False))
+    k_showonly         = bool(sd.get("KaraokeShowOnly",   False))
+    k_zoom             = bool(sd.get("KaraokeZoom",       False))
     if karaoke_on and karaoke_mode == "cumulative":
         # \k tag approach: primary = karaoke color, secondary = text color
         primary_c   = karaoke_color_ass
@@ -407,26 +411,57 @@ def _srt_to_ass(srt_content: str, style_dict: dict,
                 words = [w for w in re.split(r'(?:\\N|\s)+', text) if w]
                 n = max(1, len(words))
                 word_dur = (abs_end - abs_start) / n
-                text_c = primary_c  # text color (no swap in word mode)
+                text_c = primary_c
+
+                def _vid_build_word_text(stage: int, partial_chars: int = -1) -> str:
+                    parts = []
+                    for wi, word in enumerate(words):
+                        is_active = wi == stage
+                        is_before = wi < stage
+                        # showonly: hide other words with alpha
+                        if k_showonly and not is_active:
+                            parts.append(f"{{\\1a&HFF&}}{word}{{\\1a&H00&}}")
+                            continue
+                        tag_open  = ""
+                        tag_close = ""
+                        if is_active:
+                            if k_highlight:
+                                # thick outline in karaoke color simulates background marker
+                                tag_open  = f"{{\\3c{karaoke_color_ass}\\bord6}}"
+                                tag_close = f"{{\\3c{_hex_to_ass('000000')}\\bord{sd.get('Outline', 1)}}}"
+                            else:
+                                tag_open  = f"{{\\1c{karaoke_color_ass}}}"
+                                tag_close = f"{{\\1c{text_c}}}"
+                            if k_zoom:
+                                tag_open  = f"{{\\fscx150\\fscy150}}" + tag_open
+                                tag_close = tag_close + f"{{\\fscx100\\fscy100}}"
+                        display_word = word
+                        if is_active and k_typewriter and partial_chars >= 0:
+                            display_word = word[:partial_chars] if partial_chars < len(word) else word
+                        parts.append(tag_open + display_word + tag_close)
+                    return " ".join(parts)
+
                 for stage in range(n):
                     wt0 = abs_start + stage * word_dur
                     wt1 = abs_start + (stage + 1) * word_dur if stage < n - 1 else abs_end
-                    before  = " ".join(words[:stage])
-                    current = words[stage]
-                    after   = " ".join(words[stage + 1:])
-                    if before and after:
-                        ktext = before + " {\\1c" + karaoke_color_ass + "}" + current + "{\\1c" + text_c + "} " + after
-                    elif before:
-                        ktext = before + " {\\1c" + karaoke_color_ass + "}" + current
-                    elif after:
-                        ktext = "{\\1c" + karaoke_color_ass + "}" + current + "{\\1c" + text_c + "} " + after
+                    if k_typewriter and words[stage]:
+                        char_count = len(words[stage])
+                        char_dur   = (wt1 - wt0) / max(1, char_count)
+                        for ci in range(1, char_count + 1):
+                            ct0 = wt0 + (ci - 1) * char_dur
+                            ct1 = wt0 + ci * char_dur if ci < char_count else wt1
+                            ktext = _vid_build_word_text(stage, ci)
+                            cs0, cs1 = _ass_time(ct0), _ass_time(ct1)
+                            events.append(f"Dialogue: 0,{cs0},{cs1},Default,,{ev_ml},{ev_mr},0,,{ov_block}{ktext}")
+                            if has_text_outline:
+                                events.append(f"Dialogue: 1,{cs0},{cs1},TextOutline,,{ev_ml},{ev_mr},0,,{ov_block}{ktext}")
                     else:
-                        ktext = "{\\1c" + karaoke_color_ass + "}" + current
-                    ws0 = _ass_time(wt0)
-                    ws1 = _ass_time(wt1)
-                    events.append(f"Dialogue: 0,{ws0},{ws1},Default,,{ev_ml},{ev_mr},0,,{ov_block}{ktext}")
-                    if has_text_outline:
-                        events.append(f"Dialogue: 1,{ws0},{ws1},TextOutline,,{ev_ml},{ev_mr},0,,{ov_block}{ktext}")
+                        ktext = _vid_build_word_text(stage)
+                        ws0 = _ass_time(wt0)
+                        ws1 = _ass_time(wt1)
+                        events.append(f"Dialogue: 0,{ws0},{ws1},Default,,{ev_ml},{ev_mr},0,,{ov_block}{ktext}")
+                        if has_text_outline:
+                            events.append(f"Dialogue: 1,{ws0},{ws1},TextOutline,,{ev_ml},{ev_mr},0,,{ov_block}{ktext}")
             else:
                 if karaoke_on:  # cumulative: \k tags
                     dur   = abs_end - abs_start
@@ -478,10 +513,14 @@ def burn_subtitles(
     pos_x_px:        str   = Form(""),
     pos_y_px:        str   = Form(""),
     preview_width:   int   = Form(0),
-    karaoke_enabled: str   = Form("false"),
-    karaoke_color:   str   = Form("ffdd00"),
-    karaoke_mode:    str   = Form("word"),
-    text_align:      str   = Form("center"),
+    karaoke_enabled:    str   = Form("false"),
+    karaoke_color:      str   = Form("ffdd00"),
+    karaoke_mode:       str   = Form("word"),
+    karaoke_typewriter: str   = Form("false"),
+    karaoke_highlight:  str   = Form("false"),
+    karaoke_showonly:   str   = Form("false"),
+    karaoke_zoom:       str   = Form("false"),
+    text_align:         str   = Form("center"),
     subs_json:       str   = Form("[]"),
 ):
     video_src = os.path.join(VIDEO_IN, os.path.basename(video_name))
@@ -523,9 +562,13 @@ def burn_subtitles(
         "MarginV":        margin_v,
         "SubWidthPx":     sub_width_px,
         "SubHeightPx":    sub_height_px,
-        "KaraokeEnabled": karaoke_enabled.lower() in ("true", "1", "yes"),
-        "KaraokeColor":   karaoke_color.lstrip("#"),
-        "KaraokeMode":    karaoke_mode,
+        "KaraokeEnabled":    karaoke_enabled.lower()    in ("true", "1", "yes"),
+        "KaraokeColor":      karaoke_color.lstrip("#"),
+        "KaraokeMode":       karaoke_mode,
+        "KaraokeTypewriter": karaoke_typewriter.lower() in ("true", "1", "yes"),
+        "KaraokeHighlight":  karaoke_highlight.lower()  in ("true", "1", "yes"),
+        "KaraokeShowOnly":   karaoke_showonly.lower()   in ("true", "1", "yes"),
+        "KaraokeZoom":       karaoke_zoom.lower()       in ("true", "1", "yes"),
     }
 
     if bg_opacity > 0:

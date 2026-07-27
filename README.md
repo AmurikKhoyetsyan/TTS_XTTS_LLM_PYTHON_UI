@@ -32,10 +32,10 @@ A local **text-to-speech and video production web app** with eight tabs, served 
 | **Клонирование (XTTS v2)** | Zero-shot neural voice cloning from a 10–30 s audio sample |
 | **Мои голоса** | Library of saved voice profiles — synthesise without re-uploading |
 | **Субтитры** | SRT subtitle editor with Whisper transcription |
-| **Видео** | Upload video, style subtitles visually, burn to MP4 with FFmpeg |
-| **История** | File browser for audio, subtitles, video, and style templates |
+| **Видео** | Upload video, style subtitles visually, burn to MP4 with FFmpeg and karaoke word effects |
+| **История** | File browser for audio, subtitles, video, templates, projects and logs — with live search |
 | **Логи** | Server log viewer with per-file edit support |
-| **Редактор** | Full image/video editor — timeline, transitions, effects, subtitles, audio with sound effects, PIP, template system, export |
+| **Редактор** | Full image/video editor — timeline, transitions, effects, subtitles with karaoke word effects, audio with sound effects, PIP, template system, export |
 
 ---
 
@@ -44,8 +44,8 @@ A local **text-to-speech and video production web app** with eight tabs, served 
 - **Windows TTS** — SAPI5 / OneCore voices, adjustable rate and volume, optional SRT generation
 - **XTTS v2 voice cloning** — Coqui neural TTS, 8 languages, GPU-accelerated (CPU fallback)
 - **Whisper transcription** — speech-to-text from audio or video files; auto-populates the subtitle editor
-- **Subtitle burning** — full styling (font, colour, karaoke), style templates, FFmpeg output
-- **Image Video Editor** — non-linear timeline, 22 transitions, per-clip effects, ASS subtitles, PIP layers, audio split/trim, cursor-relative zoom (Ctrl+Scroll)
+- **Subtitle burning** — full styling (font, colour, karaoke word effects: typewriter, highlight, show-only, zoom), style templates, FFmpeg output
+- **Image Video Editor** — non-linear timeline, 22 transitions, per-clip effects, ASS subtitles with karaoke word effects, save subtitles as SRT, PIP layers, audio split/trim, cursor-relative zoom (Ctrl+Scroll)
 - **Audio effects** — 14 per-track sound effects (echo, reverb, bass boost, treble, compressor, phone, radio, low/high-pass filter, chorus, flanger, distortion, noise gate, pitch shift); speed 0.25×–4× + custom
 - **Custom audio player** — waveform drag-to-scrub, synchronized seekbar with progress fill, skip ±5 s, speed 0.5×–2×, download
 - **Template system** — save any project as a reusable template; apply via a drag-and-drop modal

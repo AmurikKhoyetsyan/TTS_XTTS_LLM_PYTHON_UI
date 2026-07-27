@@ -237,6 +237,7 @@
                     <button class="hist-type-btn" data-htype="vidtmpls">Видео шаблон</button>
                     <button class="hist-type-btn" data-htype="histlogs">Логи</button>
                 </div>
+                <input type="search" id="hist-search" placeholder="Поиск…" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:13px;width:160px;outline:none">
                 <button class="btn btn-ghost" id="hist-refresh">Обновить</button>
             </div>
 
@@ -677,6 +678,22 @@
                                         <option value="cumulative">Накопительно</option>
                                     </select>
                                 </label>
+                                <label class="vsp-field vsp-inline">
+                                    <input type="checkbox" id="vid-karaoke-typewriter">
+                                    <span>По буквам</span>
+                                </label>
+                                <label class="vsp-field vsp-inline">
+                                    <input type="checkbox" id="vid-karaoke-highlight">
+                                    <span>Фон-маркер</span>
+                                </label>
+                                <label class="vsp-field vsp-inline">
+                                    <input type="checkbox" id="vid-karaoke-showonly">
+                                    <span>Только слово</span>
+                                </label>
+                                <label class="vsp-field vsp-inline">
+                                    <input type="checkbox" id="vid-karaoke-zoom">
+                                    <span>Зум слова</span>
+                                </label>
                                 <label class="vsp-field">
                                     <span>Межстрочный</span>
                                     <input type="number" id="vid-line-height" value="1.35" min="0.5" step="0.05"
@@ -821,6 +838,7 @@
                                     </div>
                                     <button class="btn btn-sm" id="ive-new-btn">+ Новый</button>
                                 </div>
+                                <input id="ive-proj-search" type="search" placeholder="Поиск..." style="width:100%;padding:3px 6px;font-size:12px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);color:var(--text);outline:none">
                             </div>
                             <div id="ive-projects-list" class="ive-projects-list ive-stab-pane" data-stabpane="projects"></div>
                             <div id="ive-templates-list" class="ive-projects-list ive-stab-pane" data-stabpane="templates" style="display:none"></div>
@@ -917,6 +935,7 @@
                                 <button class="ive-tb-btn" id="ive-go-end"     title="К концу (End)"></button>
                             </div>
                             <button class="ive-tb-btn ive-tb-trim" id="ive-trim-btn" title="Свойства / Обрезка" disabled></button>
+                            <button class="ive-tb-btn" id="ive-save-frame-btn" title="Сохранить текущий кадр как PNG"></button>
                             <input type="range" class="ive-seek-bar" id="ive-seek-bar" min="0" max="10000" step="1" value="0">
                             <div class="ive-time-group">
                                 <span class="ive-cur-time" id="ive-cur-time">0:00.0</span>
