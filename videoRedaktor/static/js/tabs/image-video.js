@@ -181,8 +181,7 @@ export async function init() {
     const cropCancelBtn = $('ive-crop-cancel-btn');
     const cropFullBtn   = $('ive-crop-full-btn');
 
-    // .amur buttons
-    const saveAmurBtn        = $('ive-save-amur-btn');
+    // file load buttons
     const openAmurBtn        = $('ive-open-amur-btn');
     // .amur dialog elements (outside of tab section, use document.getElementById)
     const amurModal          = document.getElementById('modal-amur');
@@ -824,7 +823,43 @@ export async function init() {
     });
 
     // ── Save / Export ─────────────────────────────────────────────────────────
-    saveBtn.addEventListener('click', _saveProject);
+    saveBtn.addEventListener('click', async () => {
+        if (S.isTemplateMode && S.editingTemplateId) {
+            // Template mode → save as .vproject
+            await _saveProject({ silent: true });
+            if (!S.editingTemplateId) return;
+            const result = await _openSaveVprojectDialog(S.projectName);
+            if (!result) return;
+            try {
+                const r = await fetch('/api/imgvid/template/save-to-vproject', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tid: S.editingTemplateId, dir: result.dir, filename: result.filename }),
+                });
+                const d = await r.json();
+                if (!r.ok) { toast(d.detail || 'Ошибка сохранения', 'err'); return; }
+                toast('Шаблон сохранён: ' + d.path, 'ok');
+                log('Сохранено как .vproject: ' + d.path, 'done');
+            } catch (e) { toast(e.message, 'err'); }
+        } else {
+            // Project mode → save as .project
+            await _saveProject({ silent: true });
+            if (!S.projectId) { toast('Не удалось сохранить проект', 'err'); return; }
+            const result = await _openSaveAmurDialog(S.projectName);
+            if (!result) return;
+            try {
+                const r = await fetch('/api/imgvid/project/save-to-path', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pid: S.projectId, dir: result.dir, filename: result.filename }),
+                });
+                const d = await r.json();
+                if (!r.ok) { toast(d.detail || 'Ошибка сохранения', 'err'); return; }
+                toast('Сохранено: ' + d.path, 'ok');
+                log('Сохранено как .project: ' + d.path, 'done');
+            } catch (e) { toast(e.message, 'err'); }
+        }
+    });
     exportBtn.addEventListener('click', _startExport);
     cancelExportBtn?.addEventListener('click', async () => {
         cancelExportBtn.disabled = true;
@@ -834,43 +869,48 @@ export async function init() {
         cancelExportBtn.textContent = '✕ Отменить';
     });
     $('ive-save-template-btn')?.addEventListener('click', async () => {
-        if (!S.projectId) { await _saveProject(); }
-        if (!S.projectId) { toast('Сначала сохраните проект', 'warn'); return; }
-        const suggestedName = (S.projectName || 'Шаблон').trim();
-        const name = await openPrompt({ title: 'Сохранить как шаблон', initial: suggestedName, confirmLabel: 'Сохранить' });
-        if (name === null) return;
-        try {
-            const r = await fetch(`/api/imgvid/projects/${S.projectId}/save-as-template`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: name.trim() || suggestedName }),
-            });
-            const d = await r.json();
-            if (!r.ok) { toast(d.detail || 'Ошибка', 'err'); return; }
-            toast('Шаблон сохранён: ' + d.name, 'ok');
-            await loadTemplatesList();
-            events.dispatchEvent(new CustomEvent('imgvid-template-changed'));
-            _switchSidebarTab('templates');
-        } catch (e) { toast(e.message, 'err'); }
-    });
-    // .amur save/open
-    saveAmurBtn?.addEventListener('click', async () => {
-        if (!S.projectId) { await _saveProject(); }
-        if (!S.projectId) { toast('Не удалось сохранить проект', 'err'); return; }
-        const result = await _openSaveAmurDialog(S.projectName);
+        // Save current project as template → .vproject
+        await _saveProject({ silent: true });
+        if (!S.projectId && !S.editingTemplateId) { toast('Сначала добавьте контент', 'warn'); return; }
+
+        let tid = S.editingTemplateId;
+        if (!S.isTemplateMode || !tid) {
+            const suggestedName = (S.projectName || 'Шаблон').trim();
+            const name = await openPrompt({ title: 'Название шаблона', initial: suggestedName, confirmLabel: 'Продолжить' });
+            if (name === null) return;
+            try {
+                const r = await fetch(`/api/imgvid/projects/${S.projectId}/save-as-template`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name.trim() || suggestedName }),
+                });
+                const d = await r.json();
+                if (!r.ok) { toast(d.detail || 'Ошибка', 'err'); return; }
+                tid = d.id;
+                S.isTemplateMode = true;
+                S.editingTemplateId = tid;
+                _updateSaveBtn();
+                await loadTemplatesList();
+                events.dispatchEvent(new CustomEvent('imgvid-template-changed'));
+            } catch (e) { toast(e.message, 'err'); return; }
+        }
+
+        const result = await _openSaveVprojectDialog(S.projectName);
         if (!result) return;
         try {
-            const r = await fetch('/api/imgvid/project/save-to-path', {
+            const r = await fetch('/api/imgvid/template/save-to-vproject', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ pid: S.projectId, dir: result.dir, filename: result.filename }),
+                body: JSON.stringify({ tid, dir: result.dir, filename: result.filename }),
             });
             const d = await r.json();
             if (!r.ok) { toast(d.detail || 'Ошибка сохранения', 'err'); return; }
-            toast('Сохранено: ' + d.path, 'ok');
-            log('Сохранено как .project: ' + d.path, 'done');
+            toast('Шаблон сохранён: ' + d.path, 'ok');
+            log('Сохранено как .vproject: ' + d.path, 'done');
+            _switchSidebarTab('templates');
         } catch (e) { toast(e.message, 'err'); }
     });
+    // .project load
     openAmurBtn?.addEventListener('click', async () => {
         if (S.dirty && !confirm('Несохранённые изменения. Открыть .project?')) return;
         const result = await _openLoadAmurDialog();
@@ -915,29 +955,8 @@ export async function init() {
             toast('Проект загружен из .project', 'ok');
         } catch (e) { toast(e.message, 'err'); }
     });
-    // .vproject template save/open
-    const saveVprojectBtn = $('ive-save-vproject-btn');
+    // .vproject template load
     const openVprojectBtn = $('ive-open-vproject-btn');
-    saveVprojectBtn?.addEventListener('click', async () => {
-        if (!S.projectId) { await _saveProject(); }
-        if (!S.projectId) { toast('Сначала сохраните проект', 'warn'); return; }
-        if (!S.isTemplateMode || !S.editingTemplateId) {
-            toast('Откройте шаблон для редактирования, чтобы сохранить его как .vproject', 'warn'); return;
-        }
-        const result = await _openSaveVprojectDialog(S.projectName);
-        if (!result) return;
-        try {
-            const r = await fetch('/api/imgvid/template/save-to-vproject', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ tid: S.editingTemplateId, dir: result.dir, filename: result.filename }),
-            });
-            const d = await r.json();
-            if (!r.ok) { toast(d.detail || 'Ошибка сохранения', 'err'); return; }
-            toast('Шаблон сохранён: ' + d.path, 'ok');
-            log('Сохранено как .vproject: ' + d.path, 'done');
-        } catch (e) { toast(e.message, 'err'); }
-    });
     openVprojectBtn?.addEventListener('click', async () => {
         if (S.dirty && !confirm('Несохранённые изменения. Открыть .vproject?')) return;
         const result = await _openLoadVprojectDialog();
@@ -5571,9 +5590,8 @@ export async function init() {
         }));
     }
 
-    async function _saveProject() {
+    async function _saveProject({ silent = false } = {}) {
         if (S.isTemplateMode && S.editingTemplateId) {
-            // Save back to template
             const body = { name: S.projectName, slides: S.clips, audio: S.audioTracks, subtitles: S.subtitles, pip: S.pipLayers.filter(p => !p._empty), trackOrder: S.trackOrder, tracks: _buildTracksMetadata(), export_settings: _getExportSettings(), canvasCrop: S.canvasCrop || null };
             try {
                 const r = await fetch(`/api/imgvid/templates/${S.editingTemplateId}`, {
@@ -5584,7 +5602,7 @@ export async function init() {
                 const d = await r.json();
                 if (!r.ok) { toast(d.detail || 'Ошибка', 'err'); return; }
                 S.dirty = false;
-                toast('Шаблон сохранён', 'ok'); log('Шаблон сохранён: ' + S.projectName, 'done');
+                if (!silent) { toast('Шаблон сохранён', 'ok'); log('Шаблон сохранён: ' + S.projectName, 'done'); }
                 await loadTemplatesList();
                 events.dispatchEvent(new CustomEvent('imgvid-template-changed'));
             } catch (err) { toast(err.message, 'err'); }
@@ -5600,7 +5618,7 @@ export async function init() {
             const d = await r.json();
             if (!r.ok) { toast(d.detail || 'Ошибка', 'err'); return; }
             S.projectId = d.id; S.dirty = false;
-            toast('Проект сохранён', 'ok'); log('Проект сохранён: ' + S.projectName, 'done');
+            if (!silent) { toast('Проект сохранён', 'ok'); log('Проект сохранён: ' + S.projectName, 'done'); }
             await loadProjectsList();
         } catch (err) { toast(err.message, 'err'); }
     }
