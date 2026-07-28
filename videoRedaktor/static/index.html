@@ -9,7 +9,6 @@
     <link rel="stylesheet" href="/static/css/forms.css">
     <link rel="stylesheet" href="/static/css/audio.css">
     <link rel="stylesheet" href="/static/css/modal.css">
-    <link rel="stylesheet" href="/static/css/logger.css">
     <link rel="stylesheet" href="/static/css/custom-select.css">
     <link rel="stylesheet" href="/static/css/file-upload.css">
     <link rel="stylesheet" href="/static/css/loader.css">
@@ -203,6 +202,8 @@
                         <button class="btn btn-sm" id="ive-save-template-btn" title="Сохранить как шаблон">+ Шаблон</button>
                         <button class="btn btn-sm" id="ive-save-amur-btn" title="Сохранить проект как .project">⬇ .project</button>
                         <button class="btn btn-sm" id="ive-open-amur-btn" title="Открыть .project проект">↑ .project</button>
+                        <button class="btn btn-sm" id="ive-save-vproject-btn" title="Сохранить шаблон как .vproject">⬇ .vproject</button>
+                        <button class="btn btn-sm" id="ive-open-vproject-btn" title="Открыть шаблон .vproject">↑ .vproject</button>
                     </div>
                     <div class="ive-export-settings">
                         <button class="btn btn-sm" id="ive-exp-settings-btn">⚙ Настройки</button>
@@ -278,7 +279,7 @@
             <div id="modal-amur-files" style="margin-top:8px;max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius)"></div>
             <div id="modal-amur-upload-row" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
                 <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Или загрузить с компьютера:</div>
-                <input type="file" id="modal-amur-upload-input" accept=".project">
+                <input type="file" id="modal-amur-upload-input" accept=".project,.vproject">
             </div>
             <div class="modal-actions">
                 <button class="btn" id="modal-amur-cancel">Отмена</button>
@@ -351,30 +352,6 @@
 <!-- ============== toast / notifications ============== -->
 <div class="toast-host" id="toasts"></div>
 
-<!-- ============== logger panel ============== -->
-<button id="log-toggle" type="button" title="Показать/скрыть лог">ЛОГ</button>
-<div id="log-panel" hidden>
-    <div class="log-hdr">
-        <span class="log-title">Активность</span>
-        <button class="log-btn" id="log-clear" title="Очистить">⌫</button>
-        <button class="log-btn" id="log-close" title="Скрыть">×</button>
-    </div>
-    <div class="log-progress hidden" id="log-progress">
-        <div class="lp-head">
-            <span class="lp-text">Готово к работе</span>
-            <span class="lp-pct">0%</span>
-        </div>
-        <div class="lp-bar">
-            <div class="lp-fill"></div>
-        </div>
-        <div class="lp-meta">
-            <span class="lp-stage"></span>
-            <span class="lp-eta"></span>
-        </div>
-    </div>
-    <div class="log-body" id="log-body"></div>
-    <div class="log-resize" id="log-resize" title="Потяните, чтобы изменить высоту"></div>
-</div>
 
 <script type="module" src="/static/js/app.js"></script>
 </body>

@@ -7,6 +7,7 @@ CLIPS_DIR  = ""
 AUDIO_DIR  = ""
 THUMBS_DIR = ""
 PROJECTS_DIR = ""
+TEMPLATES_DIR = ""
 
 
 def _make_project_buf(project: dict) -> io.BytesIO:
@@ -74,5 +75,16 @@ def _finalize_project(project: dict) -> dict:
     project["updated_at"] = datetime.datetime.now().isoformat()
     ppath = os.path.join(PROJECTS_DIR, f"{pid}.json")
     with open(ppath, "w", encoding="utf-8") as fh:
+        json.dump(project, fh, ensure_ascii=False, indent=2)
+    return project
+
+
+def _finalize_template(project: dict) -> dict:
+    tid = project.get("id") or uuid.uuid4().hex
+    project["id"] = tid
+    project["is_template"] = True
+    project["updated_at"] = datetime.datetime.now().isoformat()
+    tpath = os.path.join(TEMPLATES_DIR, f"{tid}.json")
+    with open(tpath, "w", encoding="utf-8") as fh:
         json.dump(project, fh, ensure_ascii=False, indent=2)
     return project

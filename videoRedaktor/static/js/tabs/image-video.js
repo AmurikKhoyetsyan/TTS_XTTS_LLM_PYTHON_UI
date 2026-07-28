@@ -213,11 +213,13 @@ export async function init() {
 
     let _amurMode = 'save';
     let _amurResolve = null;
+    let _amurBrowseUrl = '/api/imgvid/project/browse';
+    let _amurNoFilesMsg = 'Нет .project файлов';
 
     async function _amurBrowse(dir) {
         const q = dir ? '?path=' + encodeURIComponent(dir) : '';
         try {
-            const r = await fetch('/api/imgvid/project/browse' + q);
+            const r = await fetch(_amurBrowseUrl + q);
             const d = await r.json();
             amurDirInput.value = d.dir;
             const _esc = s => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
@@ -228,12 +230,12 @@ export async function init() {
                         <span>${_esc(f.name)}</span>
                         <span style="color:var(--text-muted);font-size:11px">${(f.size/1024).toFixed(1)} KB</span>
                     </div>`).join('')
-                : '<div style="padding:10px;text-align:center;color:var(--text-muted);font-size:12px">Нет .project файлов</div>';
+                : `<div style="padding:10px;text-align:center;color:var(--text-muted);font-size:12px">${_amurNoFilesMsg}</div>`;
             amurFilesEl.querySelectorAll('.amur-file-row').forEach(el => {
                 el.addEventListener('mouseenter', () => el.style.background = 'var(--surface-hover, rgba(0,0,0,0.05))');
                 el.addEventListener('mouseleave', () => { if (!el.classList.contains('selected')) el.style.background = ''; });
                 el.addEventListener('click', () => {
-                    if (_amurMode === 'load') {
+                    if (_amurMode === 'load' || _amurMode === 'load-vproject') {
                         amurModal.hidden = true;
                         _amurResolve?.({ type: 'path', path: el.dataset.path });
                     } else {
@@ -251,13 +253,17 @@ export async function init() {
 
     async function _openSaveAmurDialog(projectName) {
         _amurMode = 'save';
+        _amurBrowseUrl = '/api/imgvid/project/browse';
+        _amurNoFilesMsg = 'Нет .project файлов';
         amurTitle.textContent = 'Сохранить проект как .project';
         amurFilenameRow.hidden = false;
         amurUploadRow.hidden = true;
         amurOkBtn.textContent = 'Сохранить';
+        amurUploadInput.accept = '.project';
         amurUploadInput.value = '';
         await _amurBrowse('');
         amurFilenameInput.value = (projectName || 'project').replace(/[^\wа-яА-Я\-]/g, '_') + '.project';
+        amurFilenameInput.placeholder = 'Имя файла (.project)';
         amurModal.hidden = false;
         amurFilenameInput.focus();
         return new Promise(resolve => { _amurResolve = resolve; });
@@ -265,10 +271,46 @@ export async function init() {
 
     async function _openLoadAmurDialog() {
         _amurMode = 'load';
+        _amurBrowseUrl = '/api/imgvid/project/browse';
+        _amurNoFilesMsg = 'Нет .project файлов';
         amurTitle.textContent = 'Открыть проект .project';
         amurFilenameRow.hidden = true;
         amurUploadRow.hidden = false;
         amurOkBtn.textContent = 'Открыть';
+        amurUploadInput.accept = '.project';
+        amurUploadInput.value = '';
+        await _amurBrowse('');
+        amurModal.hidden = false;
+        return new Promise(resolve => { _amurResolve = resolve; });
+    }
+
+    async function _openSaveVprojectDialog(tmplName) {
+        _amurMode = 'save-vproject';
+        _amurBrowseUrl = '/api/imgvid/template/browse-vproject';
+        _amurNoFilesMsg = 'Нет .vproject файлов';
+        amurTitle.textContent = 'Сохранить шаблон как .vproject';
+        amurFilenameRow.hidden = false;
+        amurUploadRow.hidden = true;
+        amurOkBtn.textContent = 'Сохранить';
+        amurUploadInput.accept = '.vproject';
+        amurUploadInput.value = '';
+        await _amurBrowse('');
+        amurFilenameInput.value = (tmplName || 'template').replace(/[^\wа-яА-Я\-]/g, '_') + '.vproject';
+        amurFilenameInput.placeholder = 'Имя файла (.vproject)';
+        amurModal.hidden = false;
+        amurFilenameInput.focus();
+        return new Promise(resolve => { _amurResolve = resolve; });
+    }
+
+    async function _openLoadVprojectDialog() {
+        _amurMode = 'load-vproject';
+        _amurBrowseUrl = '/api/imgvid/template/browse-vproject';
+        _amurNoFilesMsg = 'Нет .vproject файлов';
+        amurTitle.textContent = 'Открыть шаблон .vproject';
+        amurFilenameRow.hidden = true;
+        amurUploadRow.hidden = false;
+        amurOkBtn.textContent = 'Открыть';
+        amurUploadInput.accept = '.vproject';
         amurUploadInput.value = '';
         await _amurBrowse('');
         amurModal.hidden = false;
@@ -279,7 +321,7 @@ export async function init() {
     amurDirInput.addEventListener('keydown', e => { if (e.key === 'Enter') _amurBrowse(amurDirInput.value); });
     amurCancelBtn.addEventListener('click', () => { amurModal.hidden = true; _amurResolve?.(null); });
     amurOkBtn.addEventListener('click', () => {
-        if (_amurMode === 'save') {
+        if (_amurMode === 'save' || _amurMode === 'save-vproject') {
             const fname = amurFilenameInput.value.trim();
             if (!fname) { toast('Введите имя файла', 'err'); return; }
             amurModal.hidden = true;
@@ -825,7 +867,8 @@ export async function init() {
             });
             const d = await r.json();
             if (!r.ok) { toast(d.detail || 'Ошибка сохранения', 'err'); return; }
-            toast('Сохранено: ' + d.filename, 'ok');
+            toast('Сохранено: ' + d.path, 'ok');
+            log('Сохранено как .project: ' + d.path, 'done');
         } catch (e) { toast(e.message, 'err'); }
     });
     openAmurBtn?.addEventListener('click', async () => {
@@ -870,6 +913,75 @@ export async function init() {
             _updatePreviewSize();
             renderAll(); _pushHistory(); await loadProjectsList();
             toast('Проект загружен из .project', 'ok');
+        } catch (e) { toast(e.message, 'err'); }
+    });
+    // .vproject template save/open
+    const saveVprojectBtn = $('ive-save-vproject-btn');
+    const openVprojectBtn = $('ive-open-vproject-btn');
+    saveVprojectBtn?.addEventListener('click', async () => {
+        if (!S.projectId) { await _saveProject(); }
+        if (!S.projectId) { toast('Сначала сохраните проект', 'warn'); return; }
+        if (!S.isTemplateMode || !S.editingTemplateId) {
+            toast('Откройте шаблон для редактирования, чтобы сохранить его как .vproject', 'warn'); return;
+        }
+        const result = await _openSaveVprojectDialog(S.projectName);
+        if (!result) return;
+        try {
+            const r = await fetch('/api/imgvid/template/save-to-vproject', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tid: S.editingTemplateId, dir: result.dir, filename: result.filename }),
+            });
+            const d = await r.json();
+            if (!r.ok) { toast(d.detail || 'Ошибка сохранения', 'err'); return; }
+            toast('Шаблон сохранён: ' + d.path, 'ok');
+            log('Сохранено как .vproject: ' + d.path, 'done');
+        } catch (e) { toast(e.message, 'err'); }
+    });
+    openVprojectBtn?.addEventListener('click', async () => {
+        if (S.dirty && !confirm('Несохранённые изменения. Открыть .vproject?')) return;
+        const result = await _openLoadVprojectDialog();
+        if (!result) return;
+        toast('Открытие .vproject…', 'info');
+        try {
+            let d;
+            if (result.type === 'file') {
+                const fd = new FormData(); fd.append('file', result.file);
+                const r = await fetch('/api/imgvid/template/unpack', { method: 'POST', body: fd });
+                d = await r.json();
+                if (!r.ok) { toast(d.detail || 'Ошибка', 'err'); return; }
+            } else {
+                const r = await fetch('/api/imgvid/template/load-from-vproject', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ file_path: result.path }),
+                });
+                d = await r.json();
+                if (!r.ok) { toast(d.detail || 'Ошибка', 'err'); return; }
+            }
+            _stopPlayback();
+            S.projectId = d.id; S.projectName = d.name;
+            S.isTemplateMode = true; S.editingTemplateId = d.id;
+            S.clips = d.slides || []; S.audioTracks = d.audio || [];
+            S.audioLanes = [...new Set((S.audioTracks).map(t => t.laneIndex ?? 0))];
+            S.subtitles = d.subtitles || [];
+            _pipEls.forEach(({ wrapper }) => { if (wrapper?.parentNode) wrapper.parentNode.removeChild(wrapper); });
+            _pipEls.clear();
+            S.pipLayers = (d.pip || d.pipLayers || []).map(_normalizePip);
+            S.trackOrder = d.trackOrder || ['video', 'audio', 'subtitle', 'pip'];
+            S.selPipIdx = -1; S.selIdxs = new Set();
+            S.selIdx = S.clips.length ? 0 : -1; S.dirty = false;
+            S.canvasCrop = d.canvasCrop || null;
+            _cancelCropMode();
+            if (cropBtn) cropBtn.classList.toggle('ive-crop-active', !!S.canvasCrop);
+            if ($('ive-project-name')) $('ive-project-name').value = S.projectName;
+            _applyExportSettings(d.export_settings);
+            _historyStack.length = 0; _historyIdx = -1; _historyMinIdx = 0;
+            clearTimeout(_propsHistTimer); _propsHistTimer = null;
+            _updatePreviewSize();
+            renderAll(); _pushHistory(); await loadTemplatesList();
+            toast('Шаблон загружен из .vproject', 'ok');
+            log('Шаблон загружен из .vproject: ' + d.name, 'done');
         } catch (e) { toast(e.message, 'err'); }
     });
     // Listen for open-project event from History tab
