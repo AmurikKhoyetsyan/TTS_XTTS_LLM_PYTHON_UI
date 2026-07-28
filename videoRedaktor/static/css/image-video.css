@@ -126,6 +126,56 @@
     flex-shrink: 0;
 }
 
+/* ── Icon-only action buttons (edit / trash / etc.) ────────────────────── */
+.hist-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-dim, #7a8a9a);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background .12s, color .12s, border-color .12s;
+}
+
+.hist-btn svg {
+    width: 14px;
+    height: 14px;
+    pointer-events: none;
+    flex-shrink: 0;
+}
+
+.hist-btn:hover {
+    background: rgba(255, 255, 255, .07);
+    color: var(--text, #cdd6e0);
+    border-color: rgba(255,255,255,.1);
+}
+
+.hist-btn.danger {
+    color: #c0444a;
+}
+
+.hist-btn.danger:hover {
+    background: rgba(239, 68, 68, .15);
+    color: #ef4444;
+    border-color: rgba(239, 68, 68, .3);
+}
+
+.hist-btn.accent {
+    color: var(--accent, #4f8ef7);
+}
+
+.hist-btn.accent:hover {
+    background: rgba(79, 142, 247, .15);
+    color: #6fa8ff;
+    border-color: rgba(79, 142, 247, .3);
+}
+
 /* Media library */
 .ive-media-list {
     max-height: 220px;
