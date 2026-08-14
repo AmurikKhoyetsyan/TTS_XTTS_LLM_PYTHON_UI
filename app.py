@@ -36,6 +36,7 @@ from middleware.no_cache import NoCacheStaticMiddleware
 from routers import voices, xtts, synthesis, history
 from routers import subtitles as subtitles_router
 from routers import transcribe as transcribe_router
+from routers import audio_processing as audio_processing_router
 from core.log import server_log, app_log
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -73,6 +74,7 @@ app.include_router(synthesis.router)
 app.include_router(history.router)
 app.include_router(subtitles_router.router)
 app.include_router(transcribe_router.router)
+app.include_router(audio_processing_router.router)
 
 
 @app.get("/")

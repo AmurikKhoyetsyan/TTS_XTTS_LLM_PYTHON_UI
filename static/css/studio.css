@@ -1,0 +1,342 @@
+/* ── Studio Tab ─────────────────────────────────────────────────────────────── */
+
+/* Layout */
+.studio-layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    align-items: start;
+}
+@media (max-width: 900px) {
+    .studio-layout { grid-template-columns: 1fr; }
+}
+
+/* ── Cards ─────────────────────────────────────────────────────────────────── */
+
+.studio-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    margin-bottom: 12px;
+    overflow: hidden;
+    box-shadow: var(--shadow-sm);
+}
+
+.studio-card-hdr {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: var(--surface-2);
+    cursor: pointer;
+    user-select: none;
+    border-bottom: 1px solid var(--border);
+    transition: background .12s;
+}
+.studio-card-hdr:hover { background: var(--accent-soft); }
+
+.studio-card-hdr h3 {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--accent);
+    flex: 1;
+}
+
+.studio-card-arrow {
+    font-size: 10px;
+    color: var(--text-muted);
+    transition: transform .2s;
+}
+.studio-card.collapsed .studio-card-arrow { transform: rotate(-90deg); }
+
+.studio-card-body { padding: 14px; }
+.studio-card.collapsed .studio-card-body { display: none; }
+
+/* ── Control rows ─────────────────────────────────────────────────────────── */
+
+.ctrl-row {
+    display: grid;
+    grid-template-columns: 108px 1fr 64px;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.ctrl-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ctrl-val {
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--text);
+    text-align: right;
+    white-space: nowrap;
+    font-weight: 600;
+}
+
+/* ── Section title ────────────────────────────────────────────────────────── */
+
+.st-sect-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin: 0 0 8px;
+}
+
+/* ── Divider ──────────────────────────────────────────────────────────────── */
+
+.studio-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 12px 0;
+}
+
+/* ── Toggle rows ─────────────────────────────────────────────────────────── */
+
+.ctrl-toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.ctrl-toggle-row label {
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.ctrl-indent {
+    padding-left: 16px;
+    border-left: 2px solid var(--border);
+    margin: 6px 0 6px 4px;
+}
+
+/* ── Compact studio selects and inputs ───────────────────────────────────── */
+
+.studio-select {
+    font-size: 12px;
+    padding: 4px 28px 4px 8px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path fill='%2371717a' d='M2.5 4.5L6 8l3.5-3.5'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 7px center;
+    background-size: 11px;
+    cursor: pointer;
+    transition: border-color .12s;
+    min-width: 100px;
+}
+.studio-select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.studio-input {
+    font-size: 12px;
+    padding: 5px 10px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    transition: border-color .12s;
+}
+.studio-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* ── Preset row ─────────────────────────────────────────────────────────── */
+
+.preset-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+.preset-row label {
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    font-weight: 500;
+}
+
+.studio-reset {
+    font-size: 11px;
+    padding: 4px 9px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background .12s, color .12s;
+    white-space: nowrap;
+}
+.studio-reset:hover { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+
+/* ── 5-Band EQ ──────────────────────────────────────────────────────────── */
+
+.eq-wrap {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    align-items: flex-end;
+    padding: 4px 0 8px;
+    background: var(--surface-2);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+}
+
+.eq-band {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+    padding: 6px 0 4px;
+}
+
+.eq-band-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.eq-band-val {
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--accent);
+    font-weight: 700;
+    min-width: 30px;
+    text-align: center;
+}
+
+/* Vertical range slider */
+.eq-slider {
+    writing-mode: vertical-lr;
+    direction: rtl;
+    appearance: slider-vertical;
+    -webkit-appearance: slider-vertical;
+    width: 20px;
+    height: 80px;
+    cursor: pointer;
+    accent-color: var(--accent);
+}
+
+/* ── Preview grid ────────────────────────────────────────────────────────── */
+
+.studio-preview-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+@media (max-width: 700px) {
+    .studio-preview-grid { grid-template-columns: 1fr; }
+}
+
+.studio-preview-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+}
+
+/* ── Pipeline indicator ──────────────────────────────────────────────────── */
+
+.studio-pipeline {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+.studio-pipeline-step {
+    padding: 3px 10px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 500;
+    white-space: nowrap;
+    transition: all .2s;
+}
+
+.studio-pipeline-step.active {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent);
+    font-weight: 700;
+}
+
+.studio-pipeline-arrow {
+    color: var(--text-dim);
+    font-size: 14px;
+    line-height: 1;
+}
+
+/* ── Status lines ────────────────────────────────────────────────────────── */
+
+.studio-status {
+    font-size: 12px;
+    min-height: 18px;
+    padding: 2px 0;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+.studio-status.ok   { color: var(--success); }
+.studio-status.err  { color: var(--danger); }
+.studio-status.busy { color: var(--accent); }
+
+/* ── Project manager rows ────────────────────────────────────────────────── */
+
+.studio-mgr-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.studio-mgr-row .studio-input { flex: 1; min-width: 120px; }
+
+/* ── Compact label-select row ────────────────────────────────────────────── */
+
+.compact-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.compact-row label {
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    font-weight: 500;
+}

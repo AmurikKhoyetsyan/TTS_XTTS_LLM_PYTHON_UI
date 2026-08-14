@@ -25,6 +25,12 @@ class SavedSynthBody(BaseModel):
     text: str
     voice: str
     language: str = "Русский"
+    speed: float = 1.0
+    temperature: float = 0.65
+    repetition_penalty: float = 2.0
+    top_p: float = 0.8
+    top_k: int = 50
+    length_penalty: float = 1.0
 
 
 @router.post("/windows")
@@ -43,6 +49,12 @@ async def synthesize_xtts(
     audio: UploadFile = File(...),
     text: str = Form(...),
     language: str = Form("Русский"),
+    speed: float = Form(1.0),
+    temperature: float = Form(0.65),
+    repetition_penalty: float = Form(2.0),
+    top_p: float = Form(0.8),
+    top_k: int = Form(50),
+    length_penalty: float = Form(1.0),
 ):
     if not text.strip():
         raise HTTPException(400, "Введите текст")
@@ -50,18 +62,31 @@ async def synthesize_xtts(
     tmp.write(await audio.read())
     tmp.close()
 
-    app_log(f"XTTS synthesis started. Language: {language}, chars: {len(text)}", "INFO", "XTTS")
+    app_log(
+        f"XTTS synthesis started. Language: {language}, chars: {len(text)}"
+        f" | speed={speed} temp={temperature} rep={repetition_penalty}"
+        f" top_p={top_p} top_k={top_k} len={length_penalty}",
+        "INFO", "XTTS",
+    )
 
-    def _wrapped(text, audio_path, lang, progress=None):
+    def _wrapped(text, audio_path, lang, spd, tmp_t, rep, tp, tk, lp, progress=None):
         try:
-            return tts_xtts.synthesize(text, audio_path, lang, progress=progress)
+            return tts_xtts.synthesize(
+                text, audio_path, lang,
+                speed=spd, temperature=tmp_t, repetition_penalty=rep,
+                top_p=tp, top_k=tk, length_penalty=lp,
+                progress=progress,
+            )
         finally:
             try:
                 os.unlink(audio_path)
             except OSError:
                 pass
 
-    gen = run_synth_stream(_wrapped, (text, tmp.name, language))
+    gen = run_synth_stream(
+        _wrapped,
+        (text, tmp.name, language, speed, temperature, repetition_penalty, top_p, top_k, length_penalty),
+    )
     return StreamingResponse(gen, media_type="text/event-stream")
 
 
@@ -73,6 +98,17 @@ async def synthesize_saved(body: SavedSynthBody):
     if not voice_path:
         app_log(f"Saved voice not found: {body.voice}", "ERROR", "XTTS")
         raise HTTPException(404, f"Голос «{body.voice}» не найден")
-    app_log(f"Saved voice synthesis started. Voice: {body.voice}, language: {body.language}", "INFO", "XTTS")
-    gen = run_synth_stream(tts_xtts.synthesize, (body.text, voice_path, body.language))
+    app_log(
+        f"Saved voice synthesis started. Voice: {body.voice}, language: {body.language}"
+        f" | speed={body.speed} temp={body.temperature}",
+        "INFO", "XTTS",
+    )
+    gen = run_synth_stream(
+        tts_xtts.synthesize,
+        (
+            body.text, voice_path, body.language,
+            body.speed, body.temperature, body.repetition_penalty,
+            body.top_p, body.top_k, body.length_penalty,
+        ),
+    )
     return StreamingResponse(gen, media_type="text/event-stream")

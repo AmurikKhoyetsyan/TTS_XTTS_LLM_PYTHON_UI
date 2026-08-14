@@ -80,7 +80,18 @@ def _emit(progress, value, desc):
     print(f"[{time.strftime('%H:%M:%S')}] [{int(value * 100):3d}%] {desc}", flush=True)
 
 
-def synthesize(text, speaker_audio, language_label, progress=None):
+def synthesize(
+    text,
+    speaker_audio,
+    language_label,
+    speed=1.0,
+    temperature=0.65,
+    repetition_penalty=2.0,
+    top_p=0.8,
+    top_k=50,
+    length_penalty=1.0,
+    progress=None,
+):
     start_time = time.time()
     _emit(progress, 0.0, "Подготовка")
 
@@ -99,18 +110,35 @@ def synthesize(text, speaker_audio, language_label, progress=None):
     lang = LANGUAGES.get(language_label, "ru")
     word_count = len(text.split())
     print(
-        f"[{time.strftime('%H:%M:%S')}] Клонирование | язык: {lang} | слов: {word_count}",
+        f"[{time.strftime('%H:%M:%S')}] Клонирование | язык: {lang} | слов: {word_count}"
+        f" | speed={speed} temp={temperature}",
         flush=True,
     )
 
     tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
     tmp.close()
 
+    # Build inference kwargs — only pass non-default values to avoid breaking older TTS versions
+    infer_kwargs = {}
+    if abs(speed - 1.0) > 1e-4:
+        infer_kwargs["speed"] = float(speed)
+    if abs(temperature - 0.65) > 1e-4:
+        infer_kwargs["temperature"] = float(temperature)
+    if abs(repetition_penalty - 2.0) > 1e-4:
+        infer_kwargs["repetition_penalty"] = float(repetition_penalty)
+    if abs(top_p - 0.8) > 1e-4:
+        infer_kwargs["top_p"] = float(top_p)
+    if top_k != 50:
+        infer_kwargs["top_k"] = int(top_k)
+    if abs(length_penalty - 1.0) > 1e-4:
+        infer_kwargs["length_penalty"] = float(length_penalty)
+
     try:
         _emit(progress, 0.15, f"Анализ образца голоса (язык: {lang})")
         _emit(progress, 0.25, f"Синтез речи ({word_count} слов)")
         tts.tts_to_file(
-            text=text, speaker_wav=speaker_audio, language=lang, file_path=tmp.name
+            text=text, speaker_wav=speaker_audio, language=lang, file_path=tmp.name,
+            **infer_kwargs
         )
         _emit(progress, 0.85, "Аудио сгенерировано")
     except Exception as e:
